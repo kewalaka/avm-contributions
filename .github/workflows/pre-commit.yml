@@ -1,0 +1,105 @@
+---
+name: Pre-commit
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - modules.yaml
+      - .github/workflows/pre-commit.yml
+  workflow_dispatch:
+    inputs:
+      module_filter:
+        description: >
+          Optional substring filter on the module source field
+          (e.g. "managedenvironment"). Leave blank to run all modules.
+        required: false
+        default: ""
+
+jobs:
+  # ── 1. Read modules.yaml and build the matrix ─────────────────────────────
+  setup:
+    name: Read modules.yaml
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      modules: ${{ steps.parse.outputs.modules }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Parse modules.yaml
+        id: parse
+        env:
+          MODULE_FILTER: ${{ inputs.module_filter }}
+        run: |
+          python3 - << 'PYEOF'
+          import yaml, json, os
+
+          with open("modules.yaml") as f:
+              data = yaml.safe_load(f)
+
+          modules = data.get("modules", [])
+
+          # Apply optional substring filter
+          module_filter = os.environ.get("MODULE_FILTER", "").strip()
+          if module_filter:
+              modules = [m for m in modules if module_filter in m.get("source", "")]
+
+          # Back-fill optional fields
+          for m in modules:
+              if not m.get("name"):
+                  m["name"] = m["source"].split("/")[-1]
+              if not m.get("branch"):
+                  m["branch"] = ""
+
+          result = json.dumps(modules)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fout:
+              fout.write(f"modules={result}\n")
+          print(f"Modules to process: {result}")
+          PYEOF
+
+  # ── 2. Run pre-commit for each module ─────────────────────────────────────
+  pre-commit:
+    name: ${{ matrix.module.name }}
+    needs: setup
+    if: needs.setup.outputs.modules != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        module: ${{ fromJson(needs.setup.outputs.modules) }}
+      fail-fast: false
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ matrix.module.source }}
+          ref: ${{ matrix.module.branch }}
+
+      - name: Run pre-commit
+        env:
+          TF_IN_AUTOMATION: "1"
+          TF_VAR_enable_telemetry: "false"
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$(pwd):/src" -w /src \
+            -e TF_IN_AUTOMATION \
+            -e TF_VAR_enable_telemetry \
+            -e AVM_MOD_PATH=/src \
+            mcr.microsoft.com/azterraform:latest \
+            make pre-commit
+
+      - name: Check for uncommitted changes
+        run: |
+          if ! git diff --quiet; then
+            echo "::warning::pre-commit made changes to the following files:"
+            git diff --stat
+            echo ""
+            echo "Run './avm pre-commit' locally, then commit and push the changes."
+            exit 1
+          fi
+          echo "No changes detected — pre-commit passed cleanly."

@@ -1,0 +1,13 @@
+---
+# Registry of Azure Verified Module (AVM) contributions in progress.
+#
+# Add entries here to include a module in the CI workflows.
+#
+# Fields:
+#   source  (required): GitHub owner/repo, e.g. "kewalaka/terraform-azurerm-avm-res-foo-bar"
+#   branch  (optional): branch to test; omit to use the repo's default branch
+#   name    (optional): friendly display name; defaults to the repo name portion of source
+
+modules:
+  - source: kewalaka/terraform-azurerm-avm-res-app-managedenvironment
+    branch: kewalaka/fold-tfmodmake-into-module

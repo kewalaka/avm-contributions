@@ -162,7 +162,7 @@ jobs:
             -e ARM_OIDC_REQUEST_URL \
             -e ARM_USE_OIDC \
             --env-file <(env | grep '^TF_VAR_' | grep -v ' "TF_VAR_') \
-            ghcr.io/kewalaka/azterraform:latest \
+            mcr.microsoft.com/azterraform:avm-latest \
             make conftest
 
       # ── global setup (if examples/setup.sh exists) ──────────────────────────
@@ -196,7 +196,7 @@ jobs:
             -e ARM_OIDC_REQUEST_URL \
             -e ARM_USE_OIDC \
             --env-file <(env | grep '^TF_VAR_' | grep -v ' "TF_VAR_') \
-            ghcr.io/kewalaka/azterraform:latest \
+            mcr.microsoft.com/azterraform:avm-latest \
             ./setup.sh
 
       # ── test each example ───────────────────────────────────────────────────
@@ -240,7 +240,7 @@ jobs:
               -e ARM_OIDC_REQUEST_URL \
               -e ARM_USE_OIDC \
               --env-file <(env | grep '^TF_VAR_' | grep -v ' "TF_VAR_') \
-              ghcr.io/kewalaka/azterraform:latest \
+              mcr.microsoft.com/azterraform:avm-latest \
               make test-example
             echo "::endgroup::"
           done
@@ -277,5 +277,5 @@ jobs:
             -e ARM_OIDC_REQUEST_URL \
             -e ARM_USE_OIDC \
             --env-file <(env | grep '^TF_VAR_' | grep -v ' "TF_VAR_') \
-            ghcr.io/kewalaka/azterraform:latest \
+            mcr.microsoft.com/azterraform:avm-latest \
             ./teardown.sh

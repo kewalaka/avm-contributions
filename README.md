@@ -26,28 +26,9 @@ An autonomous `tf-module-developer-agent` can also trigger these workflows direc
 | **Checks** | push · dispatch | ✗ | `make pre-commit` → `make pr-check` (sequential; pr-check skipped if pre-commit fails) |
 | **E2E tests** | dispatch only | ✓ | conftest → `make test-example` for every example |
 | **Terraform tests** | dispatch · push | unit: ✗ / integration: ✓ | `make tf-test-unit` / `make tf-test-integration` |
-| **Build image** | push (Dockerfile) · dispatch | ✗ | builds `ghcr.io/kewalaka/azterraform:latest` |
 
-All workflows except **Build image** accept an optional **`module_filter`**
+All workflows accept an optional **`module_filter`**
 `workflow_dispatch` input so you can target a single module without editing `modules.yaml`.
-
----
-
-## First-time setup
-
-Before running any checks or tests, build the extended Docker image:
-
-```bash
-# Trigger via GitHub CLI
-gh workflow run build-image.yml
-```
-
-Or push a change to `.docker/Dockerfile` — the image builds automatically on merge to
-`main`.  All other workflows use `ghcr.io/kewalaka/azterraform:latest`, which extends
-the upstream `mcr.microsoft.com/azterraform:latest` with:
-
-- **PowerShell Core (pwsh)** — present in `mcr.microsoft.com/avm:latest` but absent
-  from `azterraform`; required by the pr-check porch config
 
 ---
 
@@ -241,11 +222,8 @@ az login
 avm-contributions/
 ├── README.md                    # this file
 ├── modules.yaml                 # registry of in-progress modules
-├── .docker/
-│   └── Dockerfile               # extends azterraform with newer porch + pwsh
 └── .github/
     └── workflows/
-        ├── build-image.yml          # builds ghcr.io/kewalaka/azterraform:latest
         ├── checks.yml               # pre-commit + pr-check (replaces pre-commit.yml + pr-check.yml)
         ├── e2e-tests.yml            # runs e2e tests (needs Azure credentials)
         └── terraform-tests.yml     # runs unit + integration terraform tests

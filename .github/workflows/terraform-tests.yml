@@ -155,7 +155,7 @@ jobs:
             -e TF_IN_AUTOMATION \
             -e TF_VAR_enable_telemetry \
             -e AVM_MOD_PATH=/src \
-            ghcr.io/kewalaka/azterraform:latest \
+            mcr.microsoft.com/azterraform:avm-latest \
             make tf-test-unit
 
   # ── 3. Integration tests (deploys real resources — needs Azure credentials) ─
@@ -236,5 +236,5 @@ jobs:
             -e ARM_OIDC_REQUEST_URL \
             -e ARM_USE_OIDC \
             --env-file <(env | grep '^TF_VAR_' | grep -v ' "TF_VAR_') \
-            ghcr.io/kewalaka/azterraform:latest \
+            mcr.microsoft.com/azterraform:avm-latest \
             make tf-test-integration

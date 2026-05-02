@@ -125,7 +125,7 @@ jobs:
             -e TF_IN_AUTOMATION \
             -e TF_VAR_enable_telemetry \
             -e AVM_MOD_PATH=/src \
-            ghcr.io/kewalaka/azterraform:latest \
+            mcr.microsoft.com/azterraform:avm-latest \
             make pre-commit
 
       - name: Check for uncommitted changes
@@ -147,5 +147,5 @@ jobs:
             -e TF_IN_AUTOMATION \
             -e TF_VAR_enable_telemetry \
             -e AVM_MOD_PATH=/src \
-            ghcr.io/kewalaka/azterraform:latest \
+            mcr.microsoft.com/azterraform:avm-latest \
             make pr-check

@@ -9,22 +9,46 @@ running checks locally, but that makes evidencing the work harder.  This reposit
 re-hosts the same checks as GitHub Actions workflows so external contributors can run
 them against multiple modules and share publicly-visible CI results with the AVM team.
 
+An autonomous `tf-module-developer-agent` can also trigger these workflows directly via
+`repository_dispatch` — no manual YAML editing required.
+
 ---
 
 ## How it works
 
 1. `modules.yaml` lists every module (and branch) you are working on.
-2. Four reusable workflows read that registry and fan out one job per module:
+2. Four reusable workflows read that registry and fan out one job per module.
+3. Alternatively, any workflow can be triggered via `repository_dispatch` from an agent —
+   bypassing `modules.yaml` entirely.
 
 | Workflow | Trigger | Azure credentials? | What it runs |
 |---|---|---|---|
-| **Pre-commit** | push · dispatch | ✗ | `make pre-commit` (formatting, docs regeneration) |
-| **PR-check** | push · dispatch | ✗ | `make pr-check` (static analysis / linting) |
+| **Checks** | push · dispatch | ✗ | `make pre-commit` → `make pr-check` (sequential; pr-check skipped if pre-commit fails) |
 | **E2E tests** | dispatch only | ✓ | conftest → `make test-example` for every example |
 | **Terraform tests** | dispatch · push | unit: ✗ / integration: ✓ | `make tf-test-unit` / `make tf-test-integration` |
+| **Build image** | push (Dockerfile) · dispatch | ✗ | builds `ghcr.io/kewalaka/azterraform:latest` |
 
-All four accept an optional **`module_filter`** `workflow_dispatch` input so you can
-target a single module without editing `modules.yaml`.
+All workflows except **Build image** accept an optional **`module_filter`**
+`workflow_dispatch` input so you can target a single module without editing `modules.yaml`.
+
+---
+
+## First-time setup
+
+Before running any checks or tests, build the extended Docker image:
+
+```bash
+# Trigger via GitHub CLI
+gh workflow run build-image.yml
+```
+
+Or push a change to `.docker/Dockerfile` — the image builds automatically on merge to
+`main`.  All other workflows use `ghcr.io/kewalaka/azterraform:latest`, which extends
+the upstream `mcr.microsoft.com/azterraform:latest` with:
+
+- **porch v0.2.6** — required by the current `avm-terraform-governance` porch configs
+  (`parallel`/`serial` command types)
+- **PowerShell Core (pwsh)** — required by the pr-check porch config
 
 ---
 
@@ -120,12 +144,49 @@ Commit and push — every workflow will automatically pick up the new entry on i
 ### Via GitHub CLI
 
 ```bash
-# Run pre-commit for all modules
-gh workflow run pre-commit.yml
+# Run checks (pre-commit + pr-check) for all modules
+gh workflow run checks.yml
 
 # Run e2e tests for a specific module
 gh workflow run e2e-tests.yml -f module_filter=managedenvironment
 ```
+
+### Via repository_dispatch (agent / API)
+
+Any caller with a `repo` scoped PAT (or `contents: write` from another Actions workflow)
+can trigger CI without touching `modules.yaml`:
+
+```bash
+# Run checks on a specific branch
+gh api repos/kewalaka/avm-contributions/dispatches \
+  --method POST \
+  --field event_type=module-checks \
+  --field client_payload='{"source":"kewalaka/terraform-azurerm-avm-res-foo-bar","branch":"feature/my-fix"}'
+
+# Run terraform unit tests only
+gh api repos/kewalaka/avm-contributions/dispatches \
+  --method POST \
+  --field event_type=module-tf-test \
+  --field client_payload='{"source":"kewalaka/terraform-azurerm-avm-res-foo-bar","branch":"feature/my-fix","test_type":"unit"}'
+
+# Trigger e2e tests (requires "test" environment approval)
+gh api repos/kewalaka/avm-contributions/dispatches \
+  --method POST \
+  --field event_type=module-e2e \
+  --field client_payload='{"source":"kewalaka/terraform-azurerm-avm-res-foo-bar","branch":"feature/my-fix"}'
+```
+
+**Dispatch event types:**
+
+| `event_type` | Workflow | Payload fields |
+|---|---|---|
+| `module-checks` | `checks.yml` | `source` (required), `branch` (optional) |
+| `module-e2e` | `e2e-tests.yml` | `source` (required), `branch` (optional) |
+| `module-tf-test` | `terraform-tests.yml` | `source` (required), `branch` (optional), `test_type` (optional: `both`/`unit`/`integration`) |
+
+For `module-e2e` and `module-tf-test`, the `source` field must belong to an allowed
+GitHub org (`kewalaka` or `Azure`).  The `test` environment gate provides a second layer
+of protection before any Azure credentials are used.
 
 ---
 
@@ -181,10 +242,12 @@ az login
 avm-contributions/
 ├── README.md                    # this file
 ├── modules.yaml                 # registry of in-progress modules
+├── .docker/
+│   └── Dockerfile               # extends azterraform with newer porch + pwsh
 └── .github/
     └── workflows/
-        ├── pre-commit.yml           # runs avm pre-commit for every module
-        ├── pr-check.yml             # runs avm pr-check for every module
+        ├── build-image.yml          # builds ghcr.io/kewalaka/azterraform:latest
+        ├── checks.yml               # pre-commit + pr-check (replaces pre-commit.yml + pr-check.yml)
         ├── e2e-tests.yml            # runs e2e tests (needs Azure credentials)
         └── terraform-tests.yml     # runs unit + integration terraform tests
 ```

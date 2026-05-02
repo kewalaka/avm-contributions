@@ -2,7 +2,23 @@
 name: Terraform tests
 
 # Unit tests use mocked providers and need no Azure credentials.
-# Integration tests deploy real resources and require Azure OIDC credentials.
+# Integration tests deploy real resources and require Azure OIDC credentials
+# and are gated behind the "test" environment (requires manual approval).
+#
+# Trigger sources
+# ──────────────
+# push / workflow_dispatch  →  reads modules from modules.yaml
+# repository_dispatch        →  single module from client_payload (agent-triggered)
+#
+# Dispatch payload (event_type: "module-tf-test"):
+#   {
+#     "source":    "kewalaka/terraform-azurerm-avm-res-foo-bar",  // required
+#     "branch":    "feature/my-fix",                              // optional
+#     "test_type": "unit"                                         // optional; defaults to "both"
+#   }
+#
+# Only repository_dispatch events whose source org is in ALLOWED_ORGS are accepted for
+# integration tests (which consume OIDC credentials).
 on:
   push:
     branches:
@@ -27,46 +43,73 @@ on:
           - both
           - unit
           - integration
+  repository_dispatch:
+    types: [module-tf-test]
 
 jobs:
-  # ── 1. Read modules.yaml and build the matrix ─────────────────────────────
+  # ── 1. Build module matrix ─────────────────────────────────────────────────
   setup:
-    name: Read modules.yaml
+    name: Build module matrix
     runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
       modules: ${{ steps.parse.outputs.modules }}
+      test_type: ${{ steps.parse.outputs.test_type }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Parse modules.yaml
+      - name: Build module matrix
         id: parse
         env:
+          EVENT_NAME: ${{ github.event_name }}
           MODULE_FILTER: ${{ inputs.module_filter }}
+          INPUT_TEST_TYPE: ${{ inputs.test_type }}
+          CLIENT_PAYLOAD: ${{ toJson(github.event.client_payload) }}
         run: |
           python3 - << 'PYEOF'
-          import yaml, json, os
+          import yaml, json, os, sys
 
-          with open("modules.yaml") as f:
-              data = yaml.safe_load(f)
+          ALLOWED_ORGS = {"kewalaka", "Azure"}
 
-          modules = data.get("modules", [])
+          event_name = os.environ.get("EVENT_NAME", "")
 
-          module_filter = os.environ.get("MODULE_FILTER", "").strip()
-          if module_filter:
-              modules = [m for m in modules if module_filter in m.get("source", "")]
-
-          for m in modules:
-              if not m.get("name"):
-                  m["name"] = m["source"].split("/")[-1]
-              if not m.get("branch"):
-                  m["branch"] = ""
+          if event_name == "repository_dispatch":
+              payload = json.loads(os.environ.get("CLIENT_PAYLOAD", "{}"))
+              source = payload.get("source", "").strip()
+              branch = payload.get("branch", "").strip()
+              if not source:
+                  print("ERROR: client_payload.source is required", file=sys.stderr)
+                  sys.exit(1)
+              org = source.split("/")[0] if "/" in source else ""
+              if org not in ALLOWED_ORGS:
+                  print(f"ERROR: source org '{org}' is not in the allowlist "
+                        f"{ALLOWED_ORGS}", file=sys.stderr)
+                  sys.exit(1)
+              modules = [{"source": source, "branch": branch,
+                          "name": source.split("/")[-1]}]
+              test_type = payload.get("test_type", "both").strip() or "both"
+          else:
+              with open("modules.yaml") as f:
+                  data = yaml.safe_load(f)
+              modules = data.get("modules", [])
+              module_filter = os.environ.get("MODULE_FILTER", "").strip()
+              if module_filter:
+                  modules = [m for m in modules
+                             if module_filter in m.get("source", "")]
+              for m in modules:
+                  if not m.get("name"):
+                      m["name"] = m["source"].split("/")[-1]
+                  if not m.get("branch"):
+                      m["branch"] = ""
+              test_type = os.environ.get("INPUT_TEST_TYPE", "").strip() or "both"
 
           result = json.dumps(modules)
           with open(os.environ["GITHUB_OUTPUT"], "a") as fout:
               fout.write(f"modules={result}\n")
+              fout.write(f"test_type={test_type}\n")
           print(f"Modules to process: {result}")
+          print(f"Test type: {test_type}")
           PYEOF
 
   # ── 2. Unit tests (mocked providers — no Azure credentials needed) ─────────
@@ -75,7 +118,7 @@ jobs:
     needs: setup
     if: >
       needs.setup.outputs.modules != '[]' &&
-      (inputs.test_type == 'unit' || inputs.test_type == 'both' || inputs.test_type == '')
+      (needs.setup.outputs.test_type == 'unit' || needs.setup.outputs.test_type == 'both')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -112,7 +155,7 @@ jobs:
             -e TF_IN_AUTOMATION \
             -e TF_VAR_enable_telemetry \
             -e AVM_MOD_PATH=/src \
-            mcr.microsoft.com/azterraform:latest \
+            ghcr.io/kewalaka/azterraform:latest \
             make tf-test-unit
 
   # ── 3. Integration tests (deploys real resources — needs Azure credentials) ─
@@ -121,7 +164,7 @@ jobs:
     needs: setup
     if: >
       needs.setup.outputs.modules != '[]' &&
-      (inputs.test_type == 'integration' || inputs.test_type == 'both' || inputs.test_type == '')
+      (needs.setup.outputs.test_type == 'integration' || needs.setup.outputs.test_type == 'both')
     runs-on: ubuntu-latest
     environment: test
     permissions:
@@ -193,5 +236,5 @@ jobs:
             -e ARM_OIDC_REQUEST_URL \
             -e ARM_USE_OIDC \
             --env-file <(env | grep '^TF_VAR_' | grep -v ' "TF_VAR_') \
-            mcr.microsoft.com/azterraform:latest \
+            ghcr.io/kewalaka/azterraform:latest \
             make tf-test-integration

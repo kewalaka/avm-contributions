@@ -1,0 +1,151 @@
+---
+name: Checks
+
+# Combined pre-commit + pr-check workflow.
+# Replaces the separate pre-commit.yml and pr-check.yml.
+#
+# Pre-commit runs first. If it fails (or leaves uncommitted changes), pr-check is
+# skipped for that module — avoiding the cost of the heavier static-analysis step.
+#
+# Trigger sources
+# ──────────────
+# push / workflow_dispatch  →  reads modules from modules.yaml
+# repository_dispatch       →  single module from client_payload (agent-triggered)
+#
+# Dispatch payload (event_type: "module-checks"):
+#   {
+#     "source":  "kewalaka/terraform-azurerm-avm-res-foo-bar",  // required
+#     "branch":  "feature/my-fix"                               // optional
+#   }
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - modules.yaml
+      - .github/workflows/checks.yml
+  workflow_dispatch:
+    inputs:
+      module_filter:
+        description: >
+          Optional substring filter on the module source field
+          (e.g. "managedenvironment"). Leave blank to run all modules.
+        required: false
+        default: ""
+  repository_dispatch:
+    types: [module-checks]
+
+jobs:
+  # ── 1. Build module matrix ─────────────────────────────────────────────────
+  setup:
+    name: Build module matrix
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      modules: ${{ steps.parse.outputs.modules }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Build module matrix
+        id: parse
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MODULE_FILTER: ${{ inputs.module_filter }}
+          CLIENT_PAYLOAD: ${{ toJson(github.event.client_payload) }}
+        run: |
+          python3 - << 'PYEOF'
+          import yaml, json, os, sys
+
+          event_name = os.environ.get("EVENT_NAME", "")
+
+          if event_name == "repository_dispatch":
+              payload = json.loads(os.environ.get("CLIENT_PAYLOAD", "{}"))
+              source = payload.get("source", "").strip()
+              branch = payload.get("branch", "").strip()
+              if not source:
+                  print("ERROR: client_payload.source is required", file=sys.stderr)
+                  sys.exit(1)
+              modules = [{"source": source, "branch": branch,
+                          "name": source.split("/")[-1]}]
+          else:
+              with open("modules.yaml") as f:
+                  data = yaml.safe_load(f)
+              modules = data.get("modules", [])
+              module_filter = os.environ.get("MODULE_FILTER", "").strip()
+              if module_filter:
+                  modules = [m for m in modules
+                             if module_filter in m.get("source", "")]
+              for m in modules:
+                  if not m.get("name"):
+                      m["name"] = m["source"].split("/")[-1]
+                  if not m.get("branch"):
+                      m["branch"] = ""
+
+          result = json.dumps(modules)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fout:
+              fout.write(f"modules={result}\n")
+          print(f"Modules to process: {result}")
+          PYEOF
+
+  # ── 2. Run checks for each module ─────────────────────────────────────────
+  #
+  # Steps run sequentially within each matrix job:
+  #   a) pre-commit  — fast, catches formatting / docs issues
+  #   b) uncommitted-changes check — fails if pre-commit modified files
+  #   c) pr-check    — skipped if either preceding step failed
+  #
+  checks:
+    name: ${{ matrix.module.name }}
+    needs: setup
+    if: needs.setup.outputs.modules != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        module: ${{ fromJson(needs.setup.outputs.modules) }}
+      fail-fast: false
+    env:
+      TF_IN_AUTOMATION: "1"
+      TF_VAR_enable_telemetry: "false"
+    steps:
+      - name: Checkout module
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ matrix.module.source }}
+          ref: ${{ matrix.module.branch }}
+
+      - name: Run pre-commit
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$(pwd):/src" -w /src \
+            -e TF_IN_AUTOMATION \
+            -e TF_VAR_enable_telemetry \
+            -e AVM_MOD_PATH=/src \
+            ghcr.io/kewalaka/azterraform:latest \
+            make pre-commit
+
+      - name: Check for uncommitted changes
+        run: |
+          if ! git diff --quiet; then
+            echo "::warning::pre-commit made changes to the following files:"
+            git diff --stat
+            echo ""
+            echo "Run './avm pre-commit' locally, then commit and push the changes."
+            exit 1
+          fi
+          echo "No changes detected — pre-commit passed cleanly."
+
+      - name: Run pr-check
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$(pwd):/src" -w /src \
+            -e TF_IN_AUTOMATION \
+            -e TF_VAR_enable_telemetry \
+            -e AVM_MOD_PATH=/src \
+            ghcr.io/kewalaka/azterraform:latest \
+            make pr-check

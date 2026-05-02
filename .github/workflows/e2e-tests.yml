@@ -39,7 +39,7 @@ jobs:
     outputs:
       modules: ${{ steps.parse.outputs.modules }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Build module matrix
         id: parse
@@ -114,8 +114,8 @@ jobs:
       TF_IN_AUTOMATION: "1"
       TF_VAR_enable_telemetry: "false"
     steps:
-      - name: Checkout module
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Checkout ${{ matrix.module.source }} (${{ matrix.module.branch || 'default branch' }})
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: ${{ matrix.module.source }}
           ref: ${{ matrix.module.branch }}
@@ -279,3 +279,35 @@ jobs:
             --env-file <(env | grep '^TF_VAR_' | grep -v ' "TF_VAR_') \
             mcr.microsoft.com/azterraform:avm-latest \
             ./teardown.sh
+
+      - name: Notify agent on completion
+        if: always() && github.event_name == 'repository_dispatch'
+        env:
+          CALLBACK_REPO: ${{ github.event.client_payload.callback_repo }}
+          AGENT_DISPATCH_TOKEN: ${{ secrets.AGENT_DISPATCH_TOKEN }}
+          JOB_STATUS: ${{ job.status }}
+          MODULE: ${{ matrix.module.source }}
+          BRANCH: ${{ matrix.module.branch }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "${CALLBACK_REPO}" ]; then
+            echo "No callback_repo in payload — skipping callback"
+            exit 0
+          fi
+          if [ -z "${AGENT_DISPATCH_TOKEN}" ]; then
+            echo "AGENT_DISPATCH_TOKEN secret not set — skipping callback"
+            exit 0
+          fi
+          payload=$(jq -n \
+            --arg status  "$JOB_STATUS" \
+            --arg module  "$MODULE" \
+            --arg branch  "$BRANCH" \
+            --arg workflow "e2e" \
+            --arg run_url "$RUN_URL" \
+            '{event_type: "ci-result", client_payload: {status: $status, module: $module, branch: $branch, workflow: $workflow, run_url: $run_url}}')
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $AGENT_DISPATCH_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/$CALLBACK_REPO/dispatches" \
+            -d "$payload"
+          echo "Notified $CALLBACK_REPO: $JOB_STATUS"

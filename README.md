@@ -137,32 +137,48 @@ Any caller with a `repo` scoped PAT (or `contents: write` from another Actions w
 can trigger CI without touching `modules.yaml`:
 
 ```bash
-# Run checks on a specific branch
+# Run checks on a specific branch (with agent callback)
 gh api repos/kewalaka/avm-contributions/dispatches \
   --method POST \
   --field event_type=module-checks \
-  --field client_payload='{"source":"kewalaka/terraform-azurerm-avm-res-foo-bar","branch":"feature/my-fix"}'
+  --field client_payload='{"source":"kewalaka/terraform-azurerm-avm-res-foo-bar","branch":"feature/my-fix","callback_repo":"kewalaka/tf-module-developer-agent"}'
 
 # Run terraform unit tests only
 gh api repos/kewalaka/avm-contributions/dispatches \
   --method POST \
   --field event_type=module-tf-test \
-  --field client_payload='{"source":"kewalaka/terraform-azurerm-avm-res-foo-bar","branch":"feature/my-fix","test_type":"unit"}'
+  --field client_payload='{"source":"kewalaka/terraform-azurerm-avm-res-foo-bar","branch":"feature/my-fix","test_type":"unit","callback_repo":"kewalaka/tf-module-developer-agent"}'
 
 # Trigger e2e tests (requires "test" environment approval)
 gh api repos/kewalaka/avm-contributions/dispatches \
   --method POST \
   --field event_type=module-e2e \
-  --field client_payload='{"source":"kewalaka/terraform-azurerm-avm-res-foo-bar","branch":"feature/my-fix"}'
+  --field client_payload='{"source":"kewalaka/terraform-azurerm-avm-res-foo-bar","branch":"feature/my-fix","callback_repo":"kewalaka/tf-module-developer-agent"}'
 ```
 
 **Dispatch event types:**
 
 | `event_type` | Workflow | Payload fields |
 |---|---|---|
-| `module-checks` | `checks.yml` | `source` (required), `branch` (optional) |
-| `module-e2e` | `e2e-tests.yml` | `source` (required), `branch` (optional) |
-| `module-tf-test` | `terraform-tests.yml` | `source` (required), `branch` (optional), `test_type` (optional: `both`/`unit`/`integration`) |
+| `module-checks` | `checks.yml` | `source` (required), `branch` (optional), `callback_repo` (optional) |
+| `module-e2e` | `e2e-tests.yml` | `source` (required), `branch` (optional), `callback_repo` (optional) |
+| `module-tf-test` | `terraform-tests.yml` | `source` (required), `branch` (optional), `test_type` (optional: `both`/`unit`/`integration`), `callback_repo` (optional) |
+
+**`callback_repo`** — when set to `"owner/repo"`, the workflow fires a `repository_dispatch`
+event of type `ci-result` back to that repository when the job completes (success or
+failure).  The target repo must have an `AGENT_DISPATCH_TOKEN` secret configured in
+`kewalaka/avm-contributions` (Settings → Secrets) with `contents: write` permission on the
+callback repo.  The `ci-result` payload contains:
+
+```json
+{
+  "status":   "success | failure",
+  "module":   "kewalaka/terraform-azurerm-avm-res-foo-bar",
+  "branch":   "feature/my-fix",
+  "workflow": "checks | e2e | unit-tests | integration-tests",
+  "run_url":  "https://github.com/kewalaka/avm-contributions/actions/runs/..."
+}
+```
 
 For `module-e2e` and `module-tf-test`, the `source` field must belong to an allowed
 GitHub org (`kewalaka` or `Azure`).  The `test` environment gate provides a second layer

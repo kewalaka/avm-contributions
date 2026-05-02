@@ -1,4 +1,3 @@
----
 name: Upgrade tests
 
 # Tests AVM module upgrades: applies the base version, upgrades to the head
@@ -38,6 +37,32 @@ jobs:
     outputs:
       examples: ${{ steps.discover.outputs.examples }}
     steps:
+      - name: Validate dispatch payload
+        env:
+          FORK_REPO: ${{ github.event.client_payload.fork_repo }}
+          DISPATCH_ID: ${{ github.event.client_payload.dispatch_id }}
+          BASE_REF: ${{ github.event.client_payload.base_ref }}
+          HEAD_REF: ${{ github.event.client_payload.head_ref }}
+        run: |
+          python3 - << 'PYEOF'
+          import os, sys
+          ALLOWED_ORGS = {"kewalaka", "Azure"}
+          errors = []
+          for field in ("DISPATCH_ID", "FORK_REPO", "BASE_REF", "HEAD_REF"):
+              if not os.environ.get(field, "").strip():
+                  errors.append(f"client_payload.{field.lower()} is required")
+          fork_repo = os.environ.get("FORK_REPO", "").strip()
+          if fork_repo:
+              org = fork_repo.split("/")[0] if "/" in fork_repo else ""
+              if org not in ALLOWED_ORGS:
+                  errors.append(f"fork_repo org '{org}' is not in allowlist {ALLOWED_ORGS}")
+          if errors:
+              for e in errors:
+                  print(f"ERROR: {e}", file=sys.stderr)
+              sys.exit(1)
+          print(f"Payload validated: fork_repo={fork_repo}")
+          PYEOF
+
       - name: Checkout ${{ github.event.client_payload.fork_repo }} at ${{ github.event.client_payload.head_ref }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -47,23 +72,10 @@ jobs:
       - name: Build example matrix
         id: discover
         env:
-          FORK_REPO: ${{ github.event.client_payload.fork_repo }}
           EXAMPLE_INPUT: ${{ github.event.client_payload.example }}
         run: |
           python3 - << 'PYEOF'
           import json, os, glob, sys
-
-          ALLOWED_ORGS = {"kewalaka", "Azure"}
-
-          fork_repo = os.environ.get("FORK_REPO", "").strip()
-          if not fork_repo:
-              print("ERROR: client_payload.fork_repo is required", file=sys.stderr)
-              sys.exit(1)
-          org = fork_repo.split("/")[0] if "/" in fork_repo else ""
-          if org not in ALLOWED_ORGS:
-              print(f"ERROR: fork_repo org '{org}' is not in the allowlist "
-                    f"{ALLOWED_ORGS}", file=sys.stderr)
-              sys.exit(1)
 
           example_input = os.environ.get("EXAMPLE_INPUT", "").strip()
           if example_input:
@@ -484,7 +496,7 @@ jobs:
       # ── h. Destroy ─────────────────────────────────────────────────────────
       - name: Destroy
         id: destroy
-        if: always() && steps.apply_base.outcome == 'success'
+        if: always() && steps.apply_base.outcome != 'skipped'
         shell: bash
         env:
           ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
@@ -573,7 +585,7 @@ jobs:
       # ── Upload artifact ─────────────────────────────────────────────────────
       - name: Upload upgrade report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: upgrade-report-${{ matrix.example.example }}
           path: |
@@ -630,3 +642,4 @@ jobs:
             "https://api.github.com/repos/$CALLBACK_REPO/dispatches" \
             -d "$payload"
           echo "Notified $CALLBACK_REPO: $JOB_STATUS"
+___BEGIN___COMMAND_DONE_MARKER___0

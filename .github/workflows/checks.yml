@@ -68,7 +68,8 @@ jobs:
                   print("ERROR: client_payload.source is required", file=sys.stderr)
                   sys.exit(1)
               modules = [{"source": source, "branch": branch,
-                          "name": source.split("/")[-1]}]
+                          "name": source.split("/")[-1],
+                          "org": source.split("/")[0]}]
           else:
               with open("modules.yaml") as f:
                   data = yaml.safe_load(f)
@@ -80,6 +81,8 @@ jobs:
               for m in modules:
                   if not m.get("name"):
                       m["name"] = m["source"].split("/")[-1]
+                  if not m.get("org"):
+                      m["org"] = m["source"].split("/")[0]
                   if not m.get("branch"):
                       m["branch"] = ""
 
@@ -111,7 +114,7 @@ jobs:
       TF_IN_AUTOMATION: "1"
       TF_VAR_enable_telemetry: "false"
     steps:
-      - name: Checkout ${{ matrix.module.source }} (${{ matrix.module.branch || 'default branch' }})
+      - name: Checkout module - Org: ${{ matrix.module.org }} - Branch: ${{ matrix.module.branch || 'default branch' }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: ${{ matrix.module.source }}

@@ -11,3 +11,5 @@
 modules:
   - source: kewalaka/terraform-azurerm-avm-res-app-managedenvironment
     branch: kewalaka/fold-tfmodmake-into-module
+  - source: kewalaka/terraform-azurerm-avm-res-containerregistry-registry
+    branch: kewalaka/feat-azapi-migration

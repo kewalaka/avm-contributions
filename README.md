@@ -9,22 +9,26 @@ running checks locally, but that makes evidencing the work harder.  This reposit
 re-hosts the same checks as GitHub Actions workflows so external contributors can run
 them against multiple modules and share publicly-visible CI results with the AVM team.
 
+An autonomous `tf-module-developer-agent` can also trigger these workflows directly via
+`repository_dispatch` — no manual YAML editing required.
+
 ---
 
 ## How it works
 
 1. `modules.yaml` lists every module (and branch) you are working on.
-2. Four reusable workflows read that registry and fan out one job per module:
+2. Four reusable workflows read that registry and fan out one job per module.
+3. Alternatively, any workflow can be triggered via `repository_dispatch` from an agent —
+   bypassing `modules.yaml` entirely.
 
 | Workflow | Trigger | Azure credentials? | What it runs |
 |---|---|---|---|
-| **Pre-commit** | push · dispatch | ✗ | `make pre-commit` (formatting, docs regeneration) |
-| **PR-check** | push · dispatch | ✗ | `make pr-check` (static analysis / linting) |
+| **Checks** | push · dispatch | ✗ | `make pre-commit` → `make pr-check` (sequential; pr-check skipped if pre-commit fails) |
 | **E2E tests** | dispatch only | ✓ | conftest → `make test-example` for every example |
 | **Terraform tests** | dispatch · push | unit: ✗ / integration: ✓ | `make tf-test-unit` / `make tf-test-integration` |
 
-All four accept an optional **`module_filter`** `workflow_dispatch` input so you can
-target a single module without editing `modules.yaml`.
+All workflows accept an optional **`module_filter`**
+`workflow_dispatch` input so you can target a single module without editing `modules.yaml`.
 
 ---
 
@@ -120,12 +124,65 @@ Commit and push — every workflow will automatically pick up the new entry on i
 ### Via GitHub CLI
 
 ```bash
-# Run pre-commit for all modules
-gh workflow run pre-commit.yml
+# Run checks (pre-commit + pr-check) for all modules
+gh workflow run checks.yml
 
 # Run e2e tests for a specific module
 gh workflow run e2e-tests.yml -f module_filter=managedenvironment
 ```
+
+### Via repository_dispatch (agent / API)
+
+Any caller with a `repo` scoped PAT (or `contents: write` from another Actions workflow)
+can trigger CI without touching `modules.yaml`:
+
+```bash
+# Run checks on a specific branch (with agent callback)
+gh api repos/kewalaka/avm-contributions/dispatches \
+  --method POST \
+  --field event_type=module-checks \
+  --field client_payload='{"source":"kewalaka/terraform-azurerm-avm-res-foo-bar","branch":"feature/my-fix","callback_repo":"kewalaka/tf-module-developer-agent"}'
+
+# Run terraform unit tests only
+gh api repos/kewalaka/avm-contributions/dispatches \
+  --method POST \
+  --field event_type=module-tf-test \
+  --field client_payload='{"source":"kewalaka/terraform-azurerm-avm-res-foo-bar","branch":"feature/my-fix","test_type":"unit","callback_repo":"kewalaka/tf-module-developer-agent"}'
+
+# Trigger e2e tests (requires "test" environment approval)
+gh api repos/kewalaka/avm-contributions/dispatches \
+  --method POST \
+  --field event_type=module-e2e \
+  --field client_payload='{"source":"kewalaka/terraform-azurerm-avm-res-foo-bar","branch":"feature/my-fix","callback_repo":"kewalaka/tf-module-developer-agent"}'
+```
+
+**Dispatch event types:**
+
+| `event_type` | Workflow | Payload fields |
+|---|---|---|
+| `module-checks` | `checks.yml` | `source` (required), `branch` (optional), `callback_repo` (optional) |
+| `module-e2e` | `e2e-tests.yml` | `source` (required), `branch` (optional), `callback_repo` (optional) |
+| `module-tf-test` | `terraform-tests.yml` | `source` (required), `branch` (optional), `test_type` (optional: `both`/`unit`/`integration`), `callback_repo` (optional) |
+
+**`callback_repo`** — when set to `"owner/repo"`, the workflow fires a `repository_dispatch`
+event of type `ci-result` back to that repository when the job completes (success or
+failure).  The target repo must have an `AGENT_DISPATCH_TOKEN` secret configured in
+`kewalaka/avm-contributions` (Settings → Secrets) with `contents: write` permission on the
+callback repo.  The `ci-result` payload contains:
+
+```json
+{
+  "status":   "success | failure",
+  "module":   "kewalaka/terraform-azurerm-avm-res-foo-bar",
+  "branch":   "feature/my-fix",
+  "workflow": "checks | e2e | unit-tests | integration-tests",
+  "run_url":  "https://github.com/kewalaka/avm-contributions/actions/runs/..."
+}
+```
+
+For `module-e2e` and `module-tf-test`, the `source` field must belong to an allowed
+GitHub org (`kewalaka` or `Azure`).  The `test` environment gate provides a second layer
+of protection before any Azure credentials are used.
 
 ---
 
@@ -183,8 +240,7 @@ avm-contributions/
 ├── modules.yaml                 # registry of in-progress modules
 └── .github/
     └── workflows/
-        ├── pre-commit.yml           # runs avm pre-commit for every module
-        ├── pr-check.yml             # runs avm pr-check for every module
+        ├── checks.yml               # pre-commit + pr-check (replaces pre-commit.yml + pr-check.yml)
         ├── e2e-tests.yml            # runs e2e tests (needs Azure credentials)
         └── terraform-tests.yml     # runs unit + integration terraform tests
 ```

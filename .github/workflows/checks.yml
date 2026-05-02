@@ -106,7 +106,7 @@ jobs:
       TF_IN_AUTOMATION: "1"
       TF_VAR_enable_telemetry: "false"
     steps:
-      - name: Checkout module - Org: ${{ matrix.module.org }} - Branch: ${{ matrix.module.branch || 'default branch' }}
+      - name: "Checkout module - Org: ${{ matrix.module.org }} - Branch: ${{ matrix.module.branch || 'default branch' }}"
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: ${{ matrix.module.source }}

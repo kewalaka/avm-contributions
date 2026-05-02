@@ -46,9 +46,8 @@ Or push a change to `.docker/Dockerfile` — the image builds automatically on m
 `main`.  All other workflows use `ghcr.io/kewalaka/azterraform:latest`, which extends
 the upstream `mcr.microsoft.com/azterraform:latest` with:
 
-- **porch v0.2.6** — required by the current `avm-terraform-governance` porch configs
-  (`parallel`/`serial` command types)
-- **PowerShell Core (pwsh)** — required by the pr-check porch config
+- **PowerShell Core (pwsh)** — present in `mcr.microsoft.com/avm:latest` but absent
+  from `azterraform`; required by the pr-check porch config
 
 ---
 

@@ -1,11 +1,8 @@
 ---
 name: Checks
 
-# Combined pre-commit + pr-check workflow.
-# Replaces the separate pre-commit.yml and pr-check.yml.
-#
-# Pre-commit runs first. If it fails (or leaves uncommitted changes), pr-check is
-# skipped for that module — avoiding the cost of the heavier static-analysis step.
+# Runs pr-check for each module in modules.yaml.
+# Pre-commit is expected to have been run by the dev agent before pushing.
 #
 # Trigger sources
 # ──────────────
@@ -68,7 +65,8 @@ jobs:
                   print("ERROR: client_payload.source is required", file=sys.stderr)
                   sys.exit(1)
               modules = [{"source": source, "branch": branch,
-                          "name": source.split("/")[-1]}]
+                          "name": source.split("/")[-1],
+                          "org": source.split("/")[0]}]
           else:
               with open("modules.yaml") as f:
                   data = yaml.safe_load(f)
@@ -80,6 +78,8 @@ jobs:
               for m in modules:
                   if not m.get("name"):
                       m["name"] = m["source"].split("/")[-1]
+                  if not m.get("org"):
+                      m["org"] = m["source"].split("/")[0]
                   if not m.get("branch"):
                       m["branch"] = ""
 
@@ -89,12 +89,7 @@ jobs:
           print(f"Modules to process: {result}")
           PYEOF
 
-  # ── 2. Run checks for each module ─────────────────────────────────────────
-  #
-  # Steps run sequentially within each matrix job:
-  #   a) pre-commit  — fast, catches formatting / docs issues
-  #   b) uncommitted-changes check — fails if pre-commit modified files
-  #   c) pr-check    — skipped if either preceding step failed
+  # ── 2. Run pr-check for each module ──────────────────────────────────────
   #
   checks:
     name: ${{ matrix.module.name }}
@@ -111,33 +106,11 @@ jobs:
       TF_IN_AUTOMATION: "1"
       TF_VAR_enable_telemetry: "false"
     steps:
-      - name: Checkout ${{ matrix.module.source }} (${{ matrix.module.branch || 'default branch' }})
+      - name: Checkout module - Org: ${{ matrix.module.org }} - Branch: ${{ matrix.module.branch || 'default branch' }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: ${{ matrix.module.source }}
           ref: ${{ matrix.module.branch }}
-
-      - name: Run pre-commit
-        run: |
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$(pwd):/src" -w /src \
-            -e TF_IN_AUTOMATION \
-            -e TF_VAR_enable_telemetry \
-            -e AVM_MOD_PATH=/src \
-            mcr.microsoft.com/azterraform:avm-latest \
-            make pre-commit
-
-      - name: Check for uncommitted changes
-        run: |
-          if ! git diff --quiet; then
-            echo "::warning::pre-commit made changes to the following files:"
-            git diff --stat
-            echo ""
-            echo "Run './avm pre-commit' locally, then commit and push the changes."
-            exit 1
-          fi
-          echo "No changes detected — pre-commit passed cleanly."
 
       - name: Run pr-check
         run: |

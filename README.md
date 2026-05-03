@@ -47,7 +47,7 @@ Three workflows deploy real Azure resources and are gated behind a GitHub Action
 
 | Workflow | Environment | Azure secrets needed |
 |---|---|---|
-| `checks.yml` | — (no Azure) | none |
+| `checks.yml` | `test` | `ARM_*` (pr-check runs terraform plan) |
 | `e2e-tests.yml` | `test` | `ARM_*` |
 | `terraform-tests.yml` (integration job) | `test` | `ARM_*` |
 | `upgrade-tests.yml` | `test` | `ARM_*` |

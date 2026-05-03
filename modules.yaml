@@ -19,3 +19,5 @@ modules:
     branch: feat/azapi-migration
   - source: kewalaka/terraform-azure-avm-res-storage-storageaccount
     branch: feat/azapi-implementation
+  - source: kewalaka/terraform-azure-avm-res-app-agent
+    branch: kewalaka/sre-agent-avm-module

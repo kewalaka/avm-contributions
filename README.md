@@ -9,8 +9,8 @@ running checks locally, but that makes evidencing the work harder.  This reposit
 re-hosts the same checks as GitHub Actions workflows so external contributors can run
 them against multiple modules and share publicly-visible CI results with the AVM team.
 
-An autonomous `tf-module-developer-agent` can also trigger these workflows directly via
-`repository_dispatch` — no manual YAML editing required.
+The [`avm-contributor-agent`](https://github.com/kewalaka/avm-contributor-agent) can also
+trigger these workflows directly via `repository_dispatch` — no manual YAML editing required.
 
 ---
 
@@ -40,47 +40,51 @@ All workflows accept an optional **`module_filter`**
   and pulled automatically by the workflows.
 - Azure CLI (`az`) — for local `az login` before running e2e tests.
 
-### GitHub repository secrets
+### GitHub environments and secrets
 
-The e2e and integration-test workflows authenticate to Azure via
-[OIDC (Workload Identity Federation)](https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/configuring-openid-connect-in-azure).
-Add the following **repository secrets** (Settings → Secrets and variables → Actions):
+Three workflows deploy real Azure resources and are gated behind a GitHub Actions
+**environment** named **`test`**.
 
-| Secret | Description |
-|---|---|
-| `ARM_TENANT_ID` | Microsoft Entra ID tenant ID |
-| `ARM_SUBSCRIPTION_ID` | Azure subscription ID to deploy resources into |
-| `ARM_CLIENT_ID` | Client (application) ID of the service principal / managed identity |
+| Workflow | Environment | Azure secrets needed |
+|---|---|---|
+| `checks.yml` | `test` | `ARM_*` (pr-check runs terraform plan) |
+| `e2e-tests.yml` | `test` | `ARM_*` |
+| `terraform-tests.yml` (integration job) | `test` | `ARM_*` |
+| `upgrade-tests.yml` | `test` | `ARM_*` |
 
-Optional overrides (used by some modules):
+Create the `test` environment in *Settings → Environments* and optionally add protection
+rules (e.g. required reviewers) before any Azure credentials are used.
 
-| Secret | Description |
-|---|---|
-| `ARM_TENANT_ID_OVERRIDE` | Alternative tenant ID |
-| `ARM_SUBSCRIPTION_ID_OVERRIDE` | Alternative subscription ID |
-| `ARM_CLIENT_ID_OVERRIDE` | Alternative client ID |
+The `test` environment **does not need its own secrets** — the workflows read from
+**repository-level secrets** (Settings → Secrets and variables → Actions):
 
-#### Setting up OIDC on Azure
+| Secret | Required | Description |
+|---|---|---|
+| `ARM_TENANT_ID` | ✓ | Microsoft Entra ID tenant ID |
+| `ARM_SUBSCRIPTION_ID` | ✓ | Azure subscription to deploy into |
+| `ARM_CLIENT_ID` | ✓ | Client ID of the User-Assigned Managed Identity |
+| `AGENT_DISPATCH_TOKEN` | ✓ | PAT with `contents: write` on `avm-contributor-agent` (for CI callbacks) |
+| `ARM_TENANT_ID_OVERRIDE` | optional | Alternative tenant for modules that need it |
+| `ARM_SUBSCRIPTION_ID_OVERRIDE` | optional | Alternative subscription |
+| `ARM_CLIENT_ID_OVERRIDE` | optional | Alternative managed identity |
+
+#### Setting up Azure OIDC and GitHub secrets automatically
+
+Run [`scripts/setup-azure-oidc.sh`](./scripts/setup-azure-oidc.sh) to:
+
+1. Create a User-Assigned Managed Identity in Azure.
+2. Assign it `Contributor` + `Role Based Access Control Administrator` on the subscription.
+3. Add a federated credential scoped to the `test` environment in this repo.
+4. Create the `test` GitHub environment.
+5. Set all required GitHub repository secrets.
 
 ```bash
-# Create (or reuse) an app registration / managed identity and add a federated credential
-# for this repository.  Replace the placeholders below.
-APP_ID="<your-app-or-managed-identity-client-id>"
-REPO="kewalaka/avm-contributions"
-
-az ad app federated-credential create \
-  --id "$APP_ID" \
-  --parameters "{
-    \"name\": \"avm-contributions-oidc\",
-    \"issuer\": \"https://token.actions.githubusercontent.com\",
-    \"subject\": \"repo:${REPO}:environment:test\",
-    \"audiences\": [\"api://AzureADTokenExchange\"]
-  }"
+# Prerequisites: az CLI logged in, gh CLI authenticated
+./scripts/setup-azure-oidc.sh
 ```
 
-The workflows use a GitHub Actions **environment** named **`test`** to gate access to
-the OIDC credentials.  Create this environment in *Settings → Environments* and (if
-needed) add protection rules such as required reviewers.
+See the script for optional environment variables to override the defaults (resource group
+name, location, identity name, etc.).
 
 ---
 
@@ -141,19 +145,19 @@ can trigger CI without touching `modules.yaml`:
 gh api repos/kewalaka/avm-contributions/dispatches \
   --method POST \
   --field event_type=module-checks \
-  --field client_payload='{"source":"kewalaka/terraform-azurerm-avm-res-foo-bar","branch":"feature/my-fix","callback_repo":"kewalaka/tf-module-developer-agent"}'
+  --field client_payload='{"source":"kewalaka/terraform-azurerm-avm-res-foo-bar","branch":"feature/my-fix","callback_repo":"kewalaka/avm-contributor-agent"}'
 
 # Run terraform unit tests only
 gh api repos/kewalaka/avm-contributions/dispatches \
   --method POST \
   --field event_type=module-tf-test \
-  --field client_payload='{"source":"kewalaka/terraform-azurerm-avm-res-foo-bar","branch":"feature/my-fix","test_type":"unit","callback_repo":"kewalaka/tf-module-developer-agent"}'
+  --field client_payload='{"source":"kewalaka/terraform-azurerm-avm-res-foo-bar","branch":"feature/my-fix","test_type":"unit","callback_repo":"kewalaka/avm-contributor-agent"}'
 
 # Trigger e2e tests (requires "test" environment approval)
 gh api repos/kewalaka/avm-contributions/dispatches \
   --method POST \
   --field event_type=module-e2e \
-  --field client_payload='{"source":"kewalaka/terraform-azurerm-avm-res-foo-bar","branch":"feature/my-fix","callback_repo":"kewalaka/tf-module-developer-agent"}'
+  --field client_payload='{"source":"kewalaka/terraform-azurerm-avm-res-foo-bar","branch":"feature/my-fix","callback_repo":"kewalaka/avm-contributor-agent"}'
 ```
 
 **Dispatch event types:**
@@ -238,9 +242,12 @@ az login
 avm-contributions/
 ├── README.md                    # this file
 ├── modules.yaml                 # registry of in-progress modules
+├── scripts/
+│   └── setup-azure-oidc.sh      # one-shot Azure + GitHub setup
 └── .github/
     └── workflows/
         ├── checks.yml               # pre-commit + pr-check (replaces pre-commit.yml + pr-check.yml)
         ├── e2e-tests.yml            # runs e2e tests (needs Azure credentials)
-        └── terraform-tests.yml     # runs unit + integration terraform tests
+        ├── terraform-tests.yml     # runs unit + integration terraform tests
+        └── upgrade-tests.yml       # tests module upgrades (apply base → upgrade → verify)
 ```

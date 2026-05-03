@@ -13,3 +13,9 @@ modules:
     branch: kewalaka/fold-tfmodmake-into-module
   - source: kewalaka/terraform-azurerm-avm-res-containerregistry-registry
     branch: kewalaka/feat-azapi-migration
+  - source: kewalaka/terraform-azurerm-avm-res-network-applicationgateway
+    branch: feat/azapi-migration
+  - source: kewalaka/terraform-azurerm-avm-res-network-applicationgatewaywebapplicationfirewallpolicy
+    branch: feat/azapi-migration
+  - source: kewalaka/terraform-azure-avm-res-storage-storageaccount
+    branch: feat/azapi-implementation

@@ -8,7 +8,13 @@ glob: "**/*.tf,**/*.tfvars,**/*.tf.json,**/*.tfvars.json"
 
 This skill provides a focused, additive workflow for scaffolding a **net-new** AVM resource module using `tfmodmake`. It covers the initial creation and integration steps.
 
-For all other AVM development tasks (fixing issues, adding features, running tests), use the primary `avm-terraform-module-development` skill. This skill handles "Step 0" (scaffolding), after which you should transition to the main development workflow.
+For all other AVM development tasks (fixing issues, adding features, running tests), use the AVM Terraform Module Development skill.  
+
+If the skill is not available, install it in the current project:
+
+```bash
+npx skills add Azure/terraform-azurerm-avm-template -s avm-terraform-module-development -y
+```
 
 ## Step 0: Prerequisites
 

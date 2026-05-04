@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "avm-terraform-module-development": {
+      "source": "Azure/terraform-azurerm-avm-template",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/avm-terraform-module-development/SKILL.md",
+      "computedHash": "70516d0452adb2cee600ebc81dc485dc52f6ab3917df672096697e289d3fd11e"
+    },
+    "skill-creator": {
+      "source": "anthropics/skills",
+      "sourceType": "github",
+      "skillPath": "skills/skill-creator/SKILL.md",
+      "computedHash": "5ea13a6d9f0d4bb694405d79acd00cadec0d21bb138c4dd10fcf3c500cb835c2"
+    }
+  }
+}

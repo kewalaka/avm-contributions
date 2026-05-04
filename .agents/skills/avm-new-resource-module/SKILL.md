@@ -1,16 +1,14 @@
 ---
 name: avm-new-resource-module
-description: Scaffold a new AVM Terraform resource module from an Azure resource type using tfmodmake, then integrate into the AVM template
+description: Create a new AVM Terraform resource module from an Azure resource type using tfmodmake.
 glob: "**/*.tf,**/*.tfvars,**/*.tf.json,**/*.tfvars.json"
 ---
 
 # AVM New Resource Module Creation
 
-This skill provides a focused, additive workflow for scaffolding a **net-new** AVM resource module using `tfmodmake`. It covers the initial creation and integration steps.
+This skill provides a workflow for creating a **net-new** AVM resource module using `tfmodmake`. It covers the initial creation and integration steps.
 
-For all other AVM development tasks (fixing issues, adding features, running tests), use the AVM Terraform Module Development skill.  
-
-If the skill is not available, install it in the current project:
+For all other AVM development tasks (fixing issues, adding features, running tests), use the AVM Terraform Module Development skill, available here:
 
 ```bash
 npx skills add Azure/terraform-azurerm-avm-template -s avm-terraform-module-development -y
@@ -46,7 +44,7 @@ This generates in the output dir:
 - `terraform.tf` — provider version constraints
 - `main.interfaces.tf` — AVM interfaces (lock, role assignments, diagnostic settings, private endpoints, telemetry)
 - `main.<child>.tf` + `variables.<child>.tf` + `modules/<child>/` — for each child resource type
-- 'modules/' - submodules for each child resource type, with their own terraform files.
+- `modules/*` - submodules for each child resource type, with their own terraform files.
 
 Inspect these files carefully before proceeding. The generated code is a starting point — not production-ready.
 
@@ -104,7 +102,6 @@ resource "azapi_resource" "this" {
   parent_id = var.parent_id
   location  = var.location
   body      = local.resource_body
-  schema_validation_enabled = false  # REQUIRED for preview API versions not yet in azapi embedded schema
   tags      = var.tags
   # ... sensitive_body, identity, response_export_values
 }
@@ -194,8 +191,6 @@ resource "azapi_resource" "lock" {
   delete_headers = var.enable_telemetry ? { "User-Agent" : local.avm_azapi_header } : null
   read_headers   = var.enable_telemetry ? { "User-Agent" : local.avm_azapi_header } : null
   update_headers = var.enable_telemetry ? { "User-Agent" : local.avm_azapi_header } : null
-
-  # schema_validation_enabled = false  # Set only if required (e.g., preview APIs not in azapi embedded schema)
 }
 
 resource "azapi_resource" "role_assignments" {
@@ -210,8 +205,6 @@ resource "azapi_resource" "role_assignments" {
   delete_headers = var.enable_telemetry ? { "User-Agent" : local.avm_azapi_header } : null
   read_headers   = var.enable_telemetry ? { "User-Agent" : local.avm_azapi_header } : null
   update_headers = var.enable_telemetry ? { "User-Agent" : local.avm_azapi_header } : null
-
-  # schema_validation_enabled = false  # Set only if required (e.g., preview APIs not in azapi embedded schema)
 }
 ```
 
@@ -239,18 +232,10 @@ This module deploys <ResourceFriendlyName> (`<ResourceType>`), providing <brief 
 
 ## Step 4: Child submodules
 
-For each child resource type (discovered via tfmodmake or ARM docs):
-
-```bash
-cd <repo-root>
-tfmodmake gen submodule -child "<ChildResourceType>" -module-name "<singular-name>" -include-preview
-```
-
-This creates `modules/<singular-name>/` and wires `main.<singular-name>.tf` + `variables.<singular-name>.tf` into the root.
+Check the Azure REST API to confirm whether the submodule is read only.  Submodules should be singular (e.g., `agent` not `agents`).  Wire each submodule from the root using a `main.<child>.tf` file that calls the child module, passing necessary shared inputs.
 
 **Post-generation checklist for each submodule:**
 
-- [ ] Add `schema_validation_enabled = false` to `azapi_resource` if preview API
 - [ ] Add `sensitive_body` blocks for any secret properties
 - [ ] Verify `enable_telemetry` is passed through from root (default to root's value)
 - [ ] Verify shared inputs are wired and used (commonly `tags`, `enable_telemetry`, and `location` **only if the child resource supports it**) to avoid tflint “unused variable” failures
@@ -259,7 +244,7 @@ This creates `modules/<singular-name>/` and wires `main.<singular-name>.tf` + `v
 ```markdown
 # <name>
 
-This submodule manages a `<ChildResourceType>` as a child of `<ParentResourceType>`. Example: `module "<name>" { source = "../../modules/<name>"; name = "my-<name>"; parent_id = module.<root>.resource_id }` (add `location` only if supported)
+This submodule manages a `<ChildResourceType>` as a child of `<ParentResourceType>`. Example: `module "<name>" { source = "../../modules/<name>"; name = "my-<name>"; parent_id = module.<root>.resource_id }`
 ```
 
 - [ ] Create `modules/<name>/_footer.md` — copy from root `_footer.md`

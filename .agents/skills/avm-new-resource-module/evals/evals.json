@@ -1,0 +1,23 @@
+{
+  "skill_name": "avm-new-resource-module",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I need to create a new AVM module for Microsoft.App/agents. Get me to a point where terraform validate passes.",
+      "expected_output": "A working AVM root module for Microsoft.App/agents that passes `terraform validate`. Should include: main.tf with azapi_resource.this wired with sensitive_body and response_export_values, locals.tf with resource_body, variables.tf with parent_id, name, location, lock, role_assignments, managed_identities, enable_telemetry, tags, and resource-specific vars, outputs.tf with resource_id/name/resource, terraform.tf with correct provider constraints (~> 1.12, azapi ~> 2.7), main.interfaces.tf using avm-utl-interfaces registry module, main.privateendpoint.tf noting PE not supported if applicable, and examples/default/main.tf that passes validate. parent_id must be a variable — no data sources to resolve parent IDs.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Scaffold an AVM Terraform module for Microsoft.Cache/redisEnterprise. It supports private endpoints. Walk me through the process and get me to a passing terraform validate.",
+      "expected_output": "A working AVM root module for Microsoft.Cache/redisEnterprise. Key checks: (1) resource type uses redisEnterprise not redis (deprecated), (2) private endpoints are kept and wired correctly since the resource supports them, (3) module named terraform-azurerm-avm-res-cache-redisenterprise, (4) terraform.tf and example providers are correct, (5) terraform validate passes in examples/default.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "I've run `tfmodmake gen avm -resource Microsoft.MachineLearningServices/workspaces -include-preview --api-version 2024-10-01` and got a bunch of generated files. Now help me wire them into the AVM template so pre-commit runs clean.",
+      "expected_output": "The agent correctly merges the generated files into the AVM template: copies azapi_resource block and resource_body into template files, replaces main.interfaces.tf stub with avm-utl-interfaces registry module, removes unsupported interfaces (CMK if not applicable), updates terraform.tf required_version to ~> 1.12, creates/updates examples/default/main.tf, runs `PORCH_NO_TUI=1 ./avm pre-commit` and resolves any lint/fmt errors. Does NOT use data sources for parent_id lookup.",
+      "files": []
+    }
+  ]
+}

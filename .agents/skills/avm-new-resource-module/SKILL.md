@@ -1,7 +1,13 @@
 ---
 name: avm-new-resource-module
-description: Create a new AVM Terraform resource module from an Azure resource type using tfmodmake.
-glob: "**/*.tf,**/*.tfvars,**/*.tf.json,**/*.tfvars.json"
+description: >-
+  Create a new AVM Terraform resource module from an Azure resource type using
+  tfmodmake. USE THIS SKILL when a user wants to scaffold, initialise, or create
+  a brand-new AVM resource module (e.g. "create an AVM module for
+  Microsoft.App/agents", "start a new Terraform AVM module", "scaffold a module
+  for <ARM resource type>", "make a new AVM module"). For fixing bugs, adding
+  features, running tests, or doing PR checks on an existing module, use the
+  avm-terraform-module-development skill instead.
 ---
 
 # AVM New Resource Module Creation
@@ -16,14 +22,13 @@ npx skills add Azure/terraform-azurerm-avm-template -s avm-terraform-module-deve
 
 ## Step 0: Prerequisites
 
-Install `tfmodmake` from source:
+Check whether `tfmodmake` is already available:
 
 ```bash
-git clone https://github.com/matt-FFFFFF/tfmodmake.git /tmp/tfmodmake-src
-cd /tmp/tfmodmake-src && go build -o /usr/local/bin/tfmodmake ./cmd/tfmodmake
+tfmodmake --help
 ```
 
-Confirm: `tfmodmake --help`
+If it is, skip to Step 1. If not, see `references/install-tfmodmake.md` for installation options.
 
 ## Step 1: Scaffold the resource with tfmodmake
 
@@ -59,9 +64,9 @@ Review the generated files against the AVM template. Key decisions:
 | `variables.tf` (resource-specific vars) | Keep — merge into template's `variables.tf` |
 | `outputs.tf` | Keep — replace template stub outputs, but remove outputs for excluded `response_export_values` fields |
 | `terraform.tf` | Keep provider versions, update `required_version` to `~> 1.12` if ephemeral vars needed |
-| `main.interfaces.tf` | switch to use the latest version on the registry (not feat/prepv1), use this for all interfaces (e.g. locks, private endpoints, etc) except diagnostic settings, which should use azurerm for now. |
-| Private endpoints variable | Remove if the resource type doesn't support PE (check ARM docs) |
-| `customer_managed_key` variable | Remove if the resource type doesn't support CMK |
+| `main.interfaces.tf` | Switch to use the latest version on the registry (not feat/prepv1), use this for all interfaces (e.g. locks, role assignments, etc) except diagnostic settings, which should use azurerm for now. |
+| Private endpoints variable | Remove if the resource type doesn't support PE. To check: look for a `privateEndpointConnections` child type in the ARM REST API docs for the resource, or check whether the resource appears in the [Azure Private Link supported services list](https://learn.microsoft.com/en-us/azure/private-link/private-endpoint-overview#private-link-resource). |
+| `customer_managed_key` variable | Remove if the resource type doesn't support CMK. To check: look for `properties.encryption` in the ARM schema via `tfmodmake discover`. |
 | Child submodules | Keep — see Step 4 |
 
 **Provider rules:**
@@ -91,19 +96,68 @@ terraform {
 
 ### `main.tf`
 
-```hcl
-## IMPORTANT: Do not use `data` sources inside modules to resolve parent IDs.
-## This is a known source of "known after apply" / planning-time issues.
-## Require the caller to pass the parent resource ID (e.g., the resource group ID).
+Passing `parent_id` as a variable (rather than resolving it via a `data` source) is a hard AVM rule — it avoids "known after apply" planning issues. The module must always require the caller to supply the parent resource ID. Do not add a `data` source to look it up.
 
+The example below is drawn from `Microsoft.App/agents` — use it as a pattern, not a copy. Substitute your resource type, API version, `response_export_values`, and `sensitive_body` fields.
+
+```hcl
 resource "azapi_resource" "this" {
-  type      = "<ResourceType>@<api-version>"
-  name      = var.name
-  parent_id = var.parent_id
+  # ① Fully-qualified ARM type including API version.
+  type      = "Microsoft.App/agents@2026-01-01"
   location  = var.location
+  name      = var.name
+  # ② Always a variable — never resolved via a data source (causes "known after apply").
+  parent_id = var.parent_id
   body      = local.resource_body
-  tags      = var.tags
-  # ... sensitive_body, identity, response_export_values
+
+  # ③ Telemetry headers — keep this pattern exactly as shown.
+  create_headers = var.enable_telemetry ? { "User-Agent" : local.avm_azapi_header } : null
+  delete_headers = var.enable_telemetry ? { "User-Agent" : local.avm_azapi_header } : null
+  read_headers   = var.enable_telemetry ? { "User-Agent" : local.avm_azapi_header } : null
+  update_headers = var.enable_telemetry ? { "User-Agent" : local.avm_azapi_header } : null
+
+  # ④ Only export fields you actually surface as outputs.
+  #    Never include: apiVersion, properties.deploymentError, properties.runningState, systemData, type
+  response_export_values = [
+    "identity.principalId",
+    "identity.tenantId",
+    "properties.agentEndpoint",
+    "properties.agentIdentity.clientId",
+    "properties.agentIdentity.enabled",
+  ]
+
+  # ⑤ Only add if the API version is absent from azapi's embedded schema.
+  #    Disables all schema validation — apply selectively and report upstream.
+  schema_validation_enabled = false
+
+  # ⑥ Secrets go in sensitive_body so they are never written to state.
+  sensitive_body = {
+    properties = {
+      incidentManagementConfiguration = var.incident_management_configuration == null ? null : {
+        connectionKey = var.connection_key
+      }
+      logConfiguration = var.log_configuration == null ? null : {
+        applicationInsightsConfiguration = {
+          connectionString = var.connection_string
+        }
+      }
+    }
+  }
+  # ⑦ Version tokens allow Terraform to detect secret rotation without storing the secret.
+  sensitive_body_version = {
+    "properties.incidentManagementConfiguration.connectionKey"                    = var.connection_key_version
+    "properties.logConfiguration.applicationInsightsConfiguration.connectionString" = var.connection_string_version
+  }
+
+  tags = var.tags
+
+  dynamic "identity" {
+    for_each = local.managed_identities.system_assigned_user_assigned
+    content {
+      type         = identity.value.type
+      identity_ids = identity.value.user_assigned_resource_ids
+    }
+  }
 }
 ```
 
@@ -127,6 +181,8 @@ variable "parent_id" {
   description = "The parent resource ID. For resource-group-scoped resources, pass the resource group ID from the caller (e.g., azurerm_resource_group.this.id)."
 }
 ```
+
+This variable is always required — it is the caller's responsibility to pass the resource group (or parent) ID. The module must never look it up internally.
 
 **`schema_validation_enabled = false` is required ONLY IF the API version is not yet in the azapi provider's embedded schema**.  Apply this only if required as selectively as possible, since it disables all schema validation and can allow invalid configurations to be deployed.  Report this to the user so it can be reported upstream.
 
@@ -218,6 +274,20 @@ If the resource does not support private endpoints, replace the template content
 
 Remove `private_endpoints`, `private_endpoints_manage_dns_zone_group` from `variables.tf` and the `private_endpoint_application_security_group_associations` local from `locals.tf`.
 
+### Module naming and repo setup
+
+Derive `<service>` and `<resource>` from the ARM resource type by lower-casing the namespace and resource segments:
+
+| ARM type | Module name |
+|---|---|
+| `Microsoft.App/agents` | `terraform-azurerm-avm-res-app-agent` |
+| `Microsoft.Cache/redisEnterprise` | `terraform-azurerm-avm-res-cache-redisenterprise` |
+| `Microsoft.Sql/servers` | `terraform-azurerm-avm-res-sql-server` |
+
+The naming convention is: `terraform-azurerm-avm-res-<namespace-without-microsoft>-<resource-singular-lowercase>`.
+
+Once the module repo is created and working, register it in this repo's `modules.yaml` file.
+
 ### `_header.md` (root)
 
 Update from the template placeholder to describe the actual resource:
@@ -279,21 +349,7 @@ This runs terraform-docs (generates `README.md` for root and all submodules), te
 
 > ⚠️ If the `./avm` wrapper hangs in TUI mode, use `PORCH_NO_TUI=1` env var. Do NOT use `NO_PORCH` (that disables porch entirely). The correct env var was confirmed to be `PORCH_NO_TUI=1` in the `avm-terraform-module-development` skill — use that.
 
-### Troubleshooting: `./avm pr-check` gets `Killed` (macOS)
-
-If Porch is getting SIGKILL’d during the “Copy to temp” phase and Make prints something like:
-
-`make: *** [avmmakefile:30: pr-check] Killed`
-
-Check for oversized generated Terraform directories (commonly `./examples/default/.terraform`, sometimes hundreds of MB). Porch’s PR check runs multiple sub-steps and copies the whole repo to temp each time; a huge `.terraform` can trip Docker Desktop’s memory/IO limits on macOS.
-
-Fix: delete the large `.terraform` directories (e.g., `rm -rf ./examples/default/.terraform **/.terraform`) and re-run `./avm pr-check`.
-
-### Troubleshooting: tflint “unused variable” in submodules
-
-If `./avm pr-check` (or `tflint`) flags unused variables in a submodule, it usually means the module defines inputs like `enable_telemetry` / `tags` / `location` but the submodule call or submodule implementation doesn’t actually use them.
-
-Fix: either wire the values into the module call (e.g., in `main.<child>.tf`) and ensure the submodule consumes them, OR remove the variables/pass-through entirely when they don’t apply (e.g., omit `location` for non-regional child resources).
+If pre-commit or pr-check fails unexpectedly (process killed, tflint unused-variable errors), see `references/troubleshooting.md`.
 
 ## Step 7: Validate
 

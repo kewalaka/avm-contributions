@@ -1,4 +1,7 @@
 name: Upgrade tests
+run-name: >
+  Upgrade ${{ github.event.client_payload.fork_repo }}
+  ${{ github.event.client_payload.base_ref }}→${{ github.event.client_payload.head_ref }}
 
 # Tests AVM module upgrades: applies the base version, upgrades to the head
 # version, and verifies no breaking changes.

@@ -158,6 +158,17 @@ gh api repos/kewalaka/avm-contributions/dispatches \
   --method POST \
   --field event_type=module-e2e \
   --field client_payload='{"source":"kewalaka/terraform-azurerm-avm-res-foo-bar","branch":"feature/my-fix","callback_repo":"kewalaka/avm-contributor-agent"}'
+
+# Trigger upgrade tests
+gh api repos/kewalaka/avm-contributions/dispatches \
+  -X POST \
+  -f 'event_type=module-upgrade' \
+  -f 'client_payload[dispatch_id]=manual-001' \
+  -f 'client_payload[upstream_repo]=Azure/terraform-azurerm-avm-res-app-managedenvironment' \
+  -f 'client_payload[fork_repo]=kewalaka/terraform-azurerm-avm-res-app-managedenvironment' \
+  -f 'client_payload[base_ref]=main' \
+  -f 'client_payload[head_ref]=kewalaka/fold-tfmodmake-into-module' \
+  -f 'client_payload[example]=default'  
 ```
 
 **Dispatch event types:**
@@ -250,4 +261,28 @@ avm-contributions/
         ├── e2e-tests.yml            # runs e2e tests (needs Azure credentials)
         ├── terraform-tests.yml     # runs unit + integration terraform tests
         └── upgrade-tests.yml       # tests module upgrades (apply base → upgrade → verify)
+```
+
+## Upgrade test flow
+
+```text
+apply_base  (BASE module + BASE example config)  → create real resources
+    ↓
+copy state to head workspace
+    ↓
+init_upgrade (HEAD module)
+    ↓
+plan_A  (HEAD module + BASE example config)    ← "does upgrading the module break existing configs?"
+    │                                             THIS is the breaking change signal
+    │
+    ├─ destroys or replacements present? → BREAKING CHANGE ✗
+    │
+    └─ neither? → NO BREAKING CHANGE ✓
+         ↓
+plan_B  (HEAD module + HEAD example config)    ← "does the new example also work?"
+         │
+         └─ optional apply_head if B is clean
+    ↓
+destroy   HEAD module if apply_head was attempted (captures partial-apply state)
+           BASE module if apply_head was skipped (avoids HEAD validation risk)
 ```

@@ -251,3 +251,27 @@ avm-contributions/
         ├── terraform-tests.yml     # runs unit + integration terraform tests
         └── upgrade-tests.yml       # tests module upgrades (apply base → upgrade → verify)
 ```
+
+## Upgrade test flow
+
+```text
+apply_base  (BASE module + BASE example config)  → create real resources
+    ↓
+copy state to head workspace
+    ↓
+init_upgrade (HEAD module)
+    ↓
+plan_A  (HEAD module + BASE example config)    ← "does upgrading the module break existing configs?"
+    │                                             THIS is the breaking change signal
+    │
+    ├─ destroys present? → BREAKING CHANGE ✗
+    │
+    └─ no destroys? → NO BREAKING CHANGE ✓
+         ↓
+plan_B  (HEAD module + HEAD example config)    ← "does the new example also work?"
+         │
+         └─ optional apply_head if B is clean
+    ↓
+destroy   BASE module always (created the resources, no new validation risk)
+           only try HEAD as fallback if BASE workspace is gone
+```

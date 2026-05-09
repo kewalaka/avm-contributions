@@ -158,6 +158,17 @@ gh api repos/kewalaka/avm-contributions/dispatches \
   --method POST \
   --field event_type=module-e2e \
   --field client_payload='{"source":"kewalaka/terraform-azurerm-avm-res-foo-bar","branch":"feature/my-fix","callback_repo":"kewalaka/avm-contributor-agent"}'
+
+# Trigger upgrade tests
+gh api repos/kewalaka/avm-contributions/dispatches \
+  -X POST \
+  -f 'event_type=module-upgrade' \
+  -f 'client_payload[dispatch_id]=manual-001' \
+  -f 'client_payload[upstream_repo]=Azure/terraform-azurerm-avm-res-app-managedenvironment' \
+  -f 'client_payload[fork_repo]=kewalaka/terraform-azurerm-avm-res-app-managedenvironment' \
+  -f 'client_payload[base_ref]=main' \
+  -f 'client_payload[head_ref]=kewalaka/fold-tfmodmake-into-module' \
+  -f 'client_payload[example]=default'  
 ```
 
 **Dispatch event types:**

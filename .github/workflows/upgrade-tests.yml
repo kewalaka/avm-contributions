@@ -396,8 +396,8 @@ jobs:
                   if re.search(r'will be destroyed\s*$', stripped):
                       resource = stripped.lstrip("#").strip().split()[0] if stripped else "unknown"
                       breaking.append(resource)
-                  # Resource must be replaced (forced recreation breaks existing deployments)
-                  elif re.search(r'must be replaced\s*$', stripped):
+                  # Resource must/will be replaced (forced recreation breaks existing deployments)
+                  elif re.search(r'(must|will) be replaced\s*$', stripped):
                       resource = stripped.lstrip("#").strip().split()[0] if stripped else "unknown"
                       breaking.append(f"{resource} [replaced]")
 

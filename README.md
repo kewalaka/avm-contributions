@@ -275,14 +275,14 @@ init_upgrade (HEAD module)
 plan_A  (HEAD module + BASE example config)    ← "does upgrading the module break existing configs?"
     │                                             THIS is the breaking change signal
     │
-    ├─ destroys present? → BREAKING CHANGE ✗
+    ├─ destroys or replacements present? → BREAKING CHANGE ✗
     │
-    └─ no destroys? → NO BREAKING CHANGE ✓
+    └─ neither? → NO BREAKING CHANGE ✓
          ↓
 plan_B  (HEAD module + HEAD example config)    ← "does the new example also work?"
          │
          └─ optional apply_head if B is clean
     ↓
-destroy   BASE module always (created the resources, no new validation risk)
-           only try HEAD as fallback if BASE workspace is gone
+destroy   HEAD module if apply_head was attempted (captures partial-apply state)
+           BASE module if apply_head was skipped (avoids HEAD validation risk)
 ```

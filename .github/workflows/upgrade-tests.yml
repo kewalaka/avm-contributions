@@ -18,7 +18,7 @@ run-name: >
 #     "base_ref":      "v0.4.0",                                     // required
 #     "head_ref":      "agent/issue-42-fix-something-abc123",        // required
 #     "example":       "default",                                    // optional; blank = all
-#     "apply_head":    "true",                                       // optional; default "false"
+#     "apply_head":    "false",                                      // optional; default is to run (set "false" to skip)
 #     "callback_repo": "<owner>/<repo>"                              // optional
 #   }
 
@@ -166,6 +166,7 @@ jobs:
                   "destroy":     "skipped",
               },
               "breaking_changes": [],
+              "plan_b_destructive_changes": [],
               "conclusion": "failure",
           }
           with open("summary.json", "w") as f:
@@ -356,7 +357,7 @@ jobs:
             -e ARM_USE_OIDC \
             --env-file <(env | grep '^TF_VAR_' | grep -v ' "TF_VAR_') \
             mcr.microsoft.com/azterraform:avm-latest \
-            terraform plan -detailed-exitcode -input=false \
+            terraform plan -no-color -detailed-exitcode -input=false \
             2>&1 | tee "module-head/examples/${EXAMPLE}_plan_a/plan_a.txt"
           PLAN_EXIT=${PIPESTATUS[0]}
           set -e
@@ -382,6 +383,11 @@ jobs:
           python3 - << 'PYEOF'
           import json, re, os
 
+          ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*[mK]')
+
+          def strip_ansi(text):
+              return ANSI_ESCAPE.sub('', text)
+
           example = os.environ["EXAMPLE"]
           plan_file = f"module-head/examples/{example}_plan_a/plan_a.txt"
 
@@ -390,8 +396,8 @@ jobs:
               with open(plan_file) as f:
                   content = f.read()
               lines = content.split("\n")
-              for i, line in enumerate(lines):
-                  stripped = line.strip()
+              for line in lines:
+                  stripped = strip_ansi(line).strip()
                   # Resource will be destroyed (pure destroy)
                   if re.search(r'will be destroyed\s*$', stripped):
                       resource = stripped.lstrip("#").strip().split()[0] if stripped else "unknown"
@@ -410,7 +416,7 @@ jobs:
           if breaking:
               print(f"::warning::Found {len(breaking)} breaking change(s): {breaking}")
           else:
-              print("No breaking changes detected.")
+              print("No breaking changes detected in Plan A.")
           PYEOF
 
       - name: Update summary — plan_a
@@ -471,7 +477,7 @@ jobs:
             -e ARM_USE_OIDC \
             --env-file <(env | grep '^TF_VAR_' | grep -v ' "TF_VAR_') \
             mcr.microsoft.com/azterraform:avm-latest \
-            terraform plan -detailed-exitcode -input=false \
+            terraform plan -no-color -detailed-exitcode -input=false \
             2>&1 | tee "module-head/examples/$EXAMPLE/plan_b.txt"
           PLAN_EXIT=${PIPESTATUS[0]}
           set -e
@@ -510,13 +516,117 @@ jobs:
               json.dump(summary, f, indent=2)
           PYEOF
 
-      # ── g. Apply head (optional) ───────────────────────────────────────────
+      # ── g. Check for destructive changes (Plan B) ──────────────────────────
+      # Flags replacements/destroys in the migration path (Plan B = HEAD module
+      # + HEAD configs). Destructive here means: even following the updated
+      # example configs, upgrade cannot proceed without a resource replacement.
+      - name: Check for destructive changes (Plan B)
+        if: >
+          steps.plan_b.outcome == 'success' &&
+          steps.plan_b.outputs.plan_status == 'changes'
+        run: |
+          python3 - << 'PYEOF'
+          import json, re, os
+
+          ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*[mK]')
+
+          def strip_ansi(text):
+              return ANSI_ESCAPE.sub('', text)
+
+          example = os.environ["EXAMPLE"]
+          plan_file = f"module-head/examples/{example}/plan_b.txt"
+
+          destructive = []
+          if os.path.exists(plan_file):
+              with open(plan_file) as f:
+                  content = f.read()
+              lines = content.split("\n")
+              for line in lines:
+                  stripped = strip_ansi(line).strip()
+                  if re.search(r'will be destroyed\s*$', stripped):
+                      resource = stripped.lstrip("#").strip().split()[0] if stripped else "unknown"
+                      destructive.append(resource)
+                  elif re.search(r'(must|will) be replaced\s*$', stripped):
+                      resource = stripped.lstrip("#").strip().split()[0] if stripped else "unknown"
+                      destructive.append(f"{resource} [replaced]")
+
+          with open("summary.json") as f:
+              summary = json.load(f)
+          summary["plan_b_destructive_changes"] = destructive
+          with open("summary.json", "w") as f:
+              json.dump(summary, f, indent=2)
+
+          if destructive:
+              print(f"::warning::Plan B has {len(destructive)} destructive change(s): {destructive}")
+          else:
+              print("No destructive changes detected in Plan B.")
+          PYEOF
+
+      # ── h. Select upgrade path ─────────────────────────────────────────────
+      # Picks Plan A (preferred: no breaking changes) or Plan B (migration path
+      # is clean) or "none" (both plans have breaking/destructive changes).
+      # Persists decision into summary.json and sets GITHUB_OUTPUT for later steps.
+      - name: Select upgrade path
+        id: select_path
+        if: always() && steps.apply_base.outcome == 'success'
+        run: |
+          python3 - << 'PYEOF'
+          import json, os
+
+          with open("summary.json") as f:
+              summary = json.load(f)
+
+          steps_status = summary["steps"]
+          example = os.environ["EXAMPLE"]
+
+          plan_a_status = steps_status.get("plan_a", "skipped")
+          plan_b_status = steps_status.get("plan_b", "skipped")
+          plan_a_breaking = summary.get("breaking_changes", [])
+          plan_b_destructive = summary.get("plan_b_destructive_changes", [])
+
+          plan_a_viable = plan_a_status in ("no_changes", "success") and not plan_a_breaking
+          plan_b_viable = plan_b_status in ("no_changes", "success") and not plan_b_destructive
+
+          if plan_a_viable:
+              apply_plan = "A"
+              apply_example_dir = f"{example}_plan_a"
+              reason = "Plan A clean — no breaking changes"
+          elif plan_b_viable:
+              apply_plan = "B"
+              apply_example_dir = example
+              reason = "Plan A has breaking changes; Plan B migration path is clean"
+          else:
+              apply_plan = "none"
+              apply_example_dir = ""
+              if plan_a_status == "skipped" and plan_b_status == "skipped":
+                  reason = "Both plans skipped"
+              else:
+                  reason = "Both Plan A and Plan B have breaking or destructive changes"
+
+          summary["selected_upgrade_path"] = apply_plan
+          summary["selected_apply_example_dir"] = apply_example_dir
+          summary["selection_reason"] = reason
+
+          with open("summary.json", "w") as f:
+              json.dump(summary, f, indent=2)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fout:
+              fout.write(f"apply_plan={apply_plan}\n")
+              fout.write(f"apply_example_dir={apply_example_dir}\n")
+
+          print(f"Selected upgrade path: {apply_plan} — {reason}")
+          PYEOF
+      # ── i. Apply head ──────────────────────────────────────────────────────
+      # Applies the selected upgrade path (Plan A or Plan B) against live state.
+      # Runs by default; set apply_head="false" in dispatch payload to skip.
       - name: Apply head (${{ env.HEAD_REF }})
         id: apply_head
         if: >
+          always() &&
           steps.apply_base.outcome == 'success' &&
-          steps.plan_b.outcome == 'success' &&
-          env.APPLY_HEAD == 'true'
+          steps.select_path.outputs.apply_plan != 'none' &&
+          steps.select_path.outputs.apply_plan != '' &&
+          env.APPLY_HEAD != 'false'
         shell: bash
         env:
           ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
@@ -526,10 +636,11 @@ jobs:
           ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
           ARM_CLIENT_ID_OVERRIDE: ${{ secrets.ARM_CLIENT_ID_OVERRIDE }}
           ARM_USE_OIDC: "true"
+          APPLY_EXAMPLE_DIR: ${{ steps.select_path.outputs.apply_example_dir }}
         run: |
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$(pwd)/module-head:/src" -w "/src/examples/$EXAMPLE" \
+            -v "$(pwd)/module-head:/src" -w "/src/examples/$APPLY_EXAMPLE_DIR" \
             --network=host \
             -e TF_IN_AUTOMATION \
             -e TF_VAR_enable_telemetry \
@@ -565,13 +676,11 @@ jobs:
               json.dump(summary, f, indent=2)
           PYEOF
 
-      # ── h. Idempotency check ───────────────────────────────────────────────
+      # ── j. Idempotency check ───────────────────────────────────────────────
       - name: Idempotency check
         id: idempotency
         if: >
-          steps.apply_base.outcome == 'success' &&
-          steps.plan_b.outcome == 'success' &&
-          env.APPLY_HEAD == 'true' &&
+          always() &&
           steps.apply_head.outcome == 'success'
         shell: bash
         env:
@@ -582,11 +691,12 @@ jobs:
           ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
           ARM_CLIENT_ID_OVERRIDE: ${{ secrets.ARM_CLIENT_ID_OVERRIDE }}
           ARM_USE_OIDC: "true"
+          APPLY_EXAMPLE_DIR: ${{ steps.select_path.outputs.apply_example_dir }}
         run: |
           set +e
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$(pwd)/module-head:/src" -w "/src/examples/$EXAMPLE" \
+            -v "$(pwd)/module-head:/src" -w "/src/examples/$APPLY_EXAMPLE_DIR" \
             --network=host \
             -e TF_IN_AUTOMATION \
             -e TF_VAR_enable_telemetry \
@@ -599,7 +709,7 @@ jobs:
             -e ARM_USE_OIDC \
             --env-file <(env | grep '^TF_VAR_' | grep -v ' "TF_VAR_') \
             mcr.microsoft.com/azterraform:avm-latest \
-            terraform plan -detailed-exitcode -input=false
+            terraform plan -no-color -detailed-exitcode -input=false
           PLAN_EXIT=$?
           set -e
 
@@ -644,26 +754,29 @@ jobs:
           ARM_CLIENT_ID_OVERRIDE: ${{ secrets.ARM_CLIENT_ID_OVERRIDE }}
           ARM_USE_OIDC: "true"
           APPLY_HEAD_OUTCOME: ${{ steps.apply_head.outcome }}
+          SELECT_PATH_DIR: ${{ steps.select_path.outputs.apply_example_dir }}
         run: |
-          # If apply_head was attempted (success or failure), the HEAD workspace may hold
-          # the freshest state (partial apply can update state before failing), so destroy
-          # from HEAD. If apply_head was never run, BASE module created all resources and
-          # is guaranteed safe to destroy — HEAD module's new validations cannot block it.
+          # If apply_head was attempted (success or failure), use the HEAD workspace that
+          # was selected (Plan A or Plan B dir). Partial apply can update state before
+          # failing, so always destroy from the workspace that was in use.
+          # If apply_head was never run, BASE module created all resources.
           if [ "${APPLY_HEAD_OUTCOME}" != "skipped" ]; then
             WORK_DIR="module-head"
+            WORK_EXAMPLE_DIR="${SELECT_PATH_DIR:-$EXAMPLE}"
           else
             WORK_DIR="module-base"
+            WORK_EXAMPLE_DIR="$EXAMPLE"
           fi
 
-          if [ ! -d "${WORK_DIR}/examples/${EXAMPLE}/.terraform" ]; then
-            echo "::warning::No initialised terraform workspace in ${WORK_DIR} — nothing to destroy"
+          if [ ! -d "${WORK_DIR}/examples/${WORK_EXAMPLE_DIR}/.terraform" ]; then
+            echo "::warning::No initialised terraform workspace in ${WORK_DIR}/examples/${WORK_EXAMPLE_DIR} — nothing to destroy"
             exit 0
           fi
 
-          echo "Destroying from ${WORK_DIR}"
+          echo "Destroying from ${WORK_DIR}/examples/${WORK_EXAMPLE_DIR}"
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$(pwd)/${WORK_DIR}:/src" -w "/src/examples/$EXAMPLE" \
+            -v "$(pwd)/${WORK_DIR}:/src" -w "/src/examples/${WORK_EXAMPLE_DIR}" \
             --network=host \
             -e TF_IN_AUTOMATION \
             -e TF_VAR_enable_telemetry \
@@ -715,7 +828,10 @@ jobs:
           if failed:
               summary["conclusion"] = "failure"
           elif steps["apply_base"] == "success" and steps["destroy"] == "success":
-              if summary.get("breaking_changes"):
+              selected_path = summary.get("selected_upgrade_path", "none")
+              plan_a_breaking = summary.get("breaking_changes", [])
+              plan_b_destructive = summary.get("plan_b_destructive_changes", [])
+              if selected_path == "none" and (plan_a_breaking or plan_b_destructive):
                   summary["conclusion"] = "breaking_change"
               else:
                   summary["conclusion"] = "success"

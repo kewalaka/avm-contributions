@@ -92,10 +92,10 @@ jobs:
   # ── 2. Run e2e tests for each module ──────────────────────────────────────
   #
   # For each module this job:
-  #   a) runs conftest (Open Policy Agent checks against Terraform plans)
-  #   b) optionally runs examples/setup.sh
-  #   c) runs `make test-example` for every example directory
-  #   d) optionally runs examples/teardown.sh
+  #   a) runs the current AVM global setup flow when available
+  #   b) runs the current AVM example test flow when available
+  #   c) falls back to legacy example targets/scripts for older modules
+  #   d) runs the current AVM global teardown flow when available
   #
   e2e:
     name: ${{ matrix.module.name }}
@@ -136,34 +136,6 @@ jobs:
           ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
           ARM_USE_OIDC: "true"
 
-      # ── conftest ────────────────────────────────────────────────────────────
-      - name: Run conftest
-        shell: bash
-        env:
-          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
-          ARM_TENANT_ID_OVERRIDE: ${{ secrets.ARM_TENANT_ID_OVERRIDE }}
-          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
-          ARM_SUBSCRIPTION_ID_OVERRIDE: ${{ secrets.ARM_SUBSCRIPTION_ID_OVERRIDE }}
-          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
-          ARM_CLIENT_ID_OVERRIDE: ${{ secrets.ARM_CLIENT_ID_OVERRIDE }}
-          ARM_USE_OIDC: "true"
-        run: |
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$(pwd):/src" -w /src \
-            -e TF_IN_AUTOMATION \
-            -e TF_VAR_enable_telemetry \
-            -e AVM_MOD_PATH=/src \
-            -e ARM_SUBSCRIPTION_ID \
-            -e ARM_TENANT_ID \
-            -e ARM_CLIENT_ID \
-            -e ARM_OIDC_REQUEST_TOKEN \
-            -e ARM_OIDC_REQUEST_URL \
-            -e ARM_USE_OIDC \
-            --env-file <(env | grep '^TF_VAR_' | grep -v ' "TF_VAR_') \
-            mcr.microsoft.com/azterraform:avm-latest \
-            make conftest
-
       # ── global setup (if examples/setup.sh exists) ──────────────────────────
       - name: Run global setup
         shell: bash
@@ -176,11 +148,6 @@ jobs:
           ARM_CLIENT_ID_OVERRIDE: ${{ secrets.ARM_CLIENT_ID_OVERRIDE }}
           ARM_USE_OIDC: "true"
         run: |
-          if [ ! -f examples/setup.sh ]; then
-            echo "No examples/setup.sh found — skipping global setup."
-            exit 0
-          fi
-          chmod +x examples/setup.sh
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$(pwd):/src" -w /src/examples \
@@ -196,7 +163,18 @@ jobs:
             -e ARM_USE_OIDC \
             --env-file <(env | grep '^TF_VAR_' | grep -v ' "TF_VAR_') \
             mcr.microsoft.com/azterraform:avm-latest \
-            ./setup.sh
+            bash -lc '
+              cd /src
+              if make -qp 2>/dev/null | grep -Fxq "globalsetup:"; then
+                make globalsetup
+              elif [ -f examples/setup.sh ]; then
+                chmod +x examples/setup.sh
+                cd examples
+                ./setup.sh
+              else
+                echo "No globalsetup target or examples/setup.sh found — skipping global setup."
+              fi
+            '
 
       # ── test each example ───────────────────────────────────────────────────
       - name: Test examples
@@ -210,39 +188,42 @@ jobs:
           ARM_CLIENT_ID_OVERRIDE: ${{ secrets.ARM_CLIENT_ID_OVERRIDE }}
           ARM_USE_OIDC: "true"
         run: |
-          # Enumerate example directories (skip directories starting with _)
-          mapfile -t EXAMPLES < <(find examples -maxdepth 1 -mindepth 1 -type d \
-            ! -name '_*' | sort)
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$(pwd):/src" -w /src \
+            --network=host \
+            -e TF_IN_AUTOMATION \
+            -e TF_VAR_enable_telemetry \
+            -e AVM_MOD_PATH=/src \
+            -e AVM_RUNNING_IN_GITHUB_ACTIONS=true \
+            -e ARM_SUBSCRIPTION_ID \
+            -e ARM_TENANT_ID \
+            -e ARM_CLIENT_ID \
+            -e ARM_OIDC_REQUEST_TOKEN \
+            -e ARM_OIDC_REQUEST_URL \
+            -e ARM_USE_OIDC \
+            --env-file <(env | grep '^TF_VAR_' | grep -v ' "TF_VAR_') \
+            mcr.microsoft.com/azterraform:avm-latest \
+            bash -lc '
+              if make -qp 2>/dev/null | grep -Fxq "test-examples:"; then
+                make test-examples
+                exit 0
+              fi
 
-          if [ ${#EXAMPLES[@]} -eq 0 ]; then
-            echo "No example directories found under examples/ — nothing to test."
-            exit 0
-          fi
+              mapfile -t EXAMPLES < <(find examples -maxdepth 1 -mindepth 1 -type d ! -name "_*" | sort)
+              if [ ${#EXAMPLES[@]} -eq 0 ]; then
+                echo "No example directories found under examples/ — nothing to test."
+                exit 0
+              fi
 
-          echo "Found ${#EXAMPLES[@]} example(s): ${EXAMPLES[*]}"
-
-          for EXAMPLE_DIR in "${EXAMPLES[@]}"; do
-            EXAMPLE_NAME=$(basename "$EXAMPLE_DIR")
-            echo "::group::Testing example: $EXAMPLE_NAME"
-            docker run --rm \
-              -v /var/run/docker.sock:/var/run/docker.sock \
-              -v "$(pwd):/src" -w /src \
-              --network=host \
-              -e TF_IN_AUTOMATION \
-              -e TF_VAR_enable_telemetry \
-              -e AVM_MOD_PATH=/src \
-              -e AVM_EXAMPLE="$EXAMPLE_NAME" \
-              -e ARM_SUBSCRIPTION_ID \
-              -e ARM_TENANT_ID \
-              -e ARM_CLIENT_ID \
-              -e ARM_OIDC_REQUEST_TOKEN \
-              -e ARM_OIDC_REQUEST_URL \
-              -e ARM_USE_OIDC \
-              --env-file <(env | grep '^TF_VAR_' | grep -v ' "TF_VAR_') \
-              mcr.microsoft.com/azterraform:avm-latest \
-              make test-example
-            echo "::endgroup::"
-          done
+              echo "Falling back to legacy make test-example flow for ${#EXAMPLES[@]} example(s): ${EXAMPLES[*]}"
+              for EXAMPLE_DIR in "${EXAMPLES[@]}"; do
+                EXAMPLE_NAME=$(basename "$EXAMPLE_DIR")
+                echo "::group::Testing example: $EXAMPLE_NAME"
+                AVM_EXAMPLE="$EXAMPLE_NAME" make test-example
+                echo "::endgroup::"
+              done
+            '
 
       # ── global teardown (if examples/teardown.sh exists) ───────────────────
       - name: Run global teardown
@@ -257,11 +238,6 @@ jobs:
           ARM_CLIENT_ID_OVERRIDE: ${{ secrets.ARM_CLIENT_ID_OVERRIDE }}
           ARM_USE_OIDC: "true"
         run: |
-          if [ ! -f examples/teardown.sh ]; then
-            echo "No examples/teardown.sh found — skipping global teardown."
-            exit 0
-          fi
-          chmod +x examples/teardown.sh
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$(pwd):/src" -w /src/examples \
@@ -277,7 +253,18 @@ jobs:
             -e ARM_USE_OIDC \
             --env-file <(env | grep '^TF_VAR_' | grep -v ' "TF_VAR_') \
             mcr.microsoft.com/azterraform:avm-latest \
-            ./teardown.sh
+            bash -lc '
+              cd /src
+              if make -qp 2>/dev/null | grep -Fxq "globalteardown:"; then
+                make globalteardown
+              elif [ -f examples/teardown.sh ]; then
+                chmod +x examples/teardown.sh
+                cd examples
+                ./teardown.sh
+              else
+                echo "No globalteardown target or examples/teardown.sh found — skipping global teardown."
+              fi
+            '
 
       - name: Notify agent on completion
         if: always() && github.event_name == 'repository_dispatch'

@@ -23,8 +23,8 @@ trigger these workflows directly via `repository_dispatch` — no manual YAML ed
 
 | Workflow | Trigger | Azure credentials? | What it runs |
 |---|---|---|---|
-| **Checks** | push · dispatch | ✗ | `make pre-commit` → `make pr-check` (sequential; pr-check skipped if pre-commit fails) |
-| **E2E tests** | dispatch only | ✓ | conftest → `make test-example` for every example |
+| **Checks** | push · dispatch | ✓ | `make pre-commit` → `make pr-check` (recent AVM modules also run Well-Architected/conftest checks here) |
+| **E2E tests** | workflow_dispatch · repository_dispatch | ✓ | `make test-examples` on recent AVM modules; legacy `make test-example` fallback |
 | **Terraform tests** | dispatch · push | unit: ✗ / integration: ✓ | `make tf-test-unit` / `make tf-test-integration` |
 
 All workflows accept an optional **`module_filter`**
@@ -145,19 +145,26 @@ can trigger CI without touching `modules.yaml`:
 gh api repos/kewalaka/avm-contributions/dispatches \
   --method POST \
   --field event_type=module-checks \
-  --field client_payload='{"source":"kewalaka/terraform-azurerm-avm-res-foo-bar","branch":"feature/my-fix","callback_repo":"kewalaka/avm-contributor-agent"}'
+  --field 'client_payload[source]=kewalaka/terraform-azurerm-avm-res-foo-bar' \
+  --field 'client_payload[branch]=feature/my-fix' \
+  --field 'client_payload[callback_repo]=kewalaka/avm-contributor-agent'
 
 # Run terraform unit tests only
 gh api repos/kewalaka/avm-contributions/dispatches \
   --method POST \
   --field event_type=module-tf-test \
-  --field client_payload='{"source":"kewalaka/terraform-azurerm-avm-res-foo-bar","branch":"feature/my-fix","test_type":"unit","callback_repo":"kewalaka/avm-contributor-agent"}'
+  --field 'client_payload[source]=kewalaka/terraform-azurerm-avm-res-foo-bar' \
+  --field 'client_payload[branch]=feature/my-fix' \
+  --field 'client_payload[test_type]=unit' \
+  --field 'client_payload[callback_repo]=kewalaka/avm-contributor-agent'
 
 # Trigger e2e tests (requires "test" environment approval)
 gh api repos/kewalaka/avm-contributions/dispatches \
   --method POST \
   --field event_type=module-e2e \
-  --field client_payload='{"source":"kewalaka/terraform-azurerm-avm-res-foo-bar","branch":"feature/my-fix","callback_repo":"kewalaka/avm-contributor-agent"}'
+  --field 'client_payload[source]=kewalaka/terraform-azurerm-avm-res-foo-bar' \
+  --field 'client_payload[branch]=feature/my-fix' \
+  --field 'client_payload[callback_repo]=kewalaka/avm-contributor-agent'
 
 # Trigger upgrade tests
 gh api repos/kewalaka/avm-contributions/dispatches \
@@ -170,6 +177,9 @@ gh api repos/kewalaka/avm-contributions/dispatches \
   -f 'client_payload[head_ref]=kewalaka/fold-tfmodmake-into-module' \
   -f 'client_payload[example]=default'  
 ```
+
+`gh api --field client_payload='{"...":"..."}'` sends `client_payload` as a JSON
+string, not an object. Use nested `client_payload[...]` fields as shown above.
 
 **Dispatch event types:**
 
@@ -224,12 +234,7 @@ git add -A && git commit -m "chore: pre-commit fixes" && git push
 
 ```bash
 az login
-cd examples/default
-terraform init
-terraform plan
-terraform apply
-terraform plan   # should show "0 changes" (idempotency check)
-terraform destroy
+./avm test-examples
 ```
 
 ### 4. Unit tests

@@ -78,7 +78,7 @@ jobs:
           EXAMPLE_INPUT: ${{ github.event.client_payload.example }}
         run: |
           python3 - << 'PYEOF'
-          import json, os, glob, sys
+          import glob, json, os, sys
 
           example_input = os.environ.get("EXAMPLE_INPUT", "").strip()
           if example_input:
@@ -88,7 +88,16 @@ jobs:
               if not found:
                   print("ERROR: no examples/*/main.tf found", file=sys.stderr)
                   sys.exit(1)
-              examples = [{"example": p.split("/")[1]} for p in found]
+              examples = []
+              for p in found:
+                  example = p.split("/")[1]
+                  if os.path.exists(f"examples/{example}/.e2eignore"):
+                      print(f"Skipping example '{example}' because it contains .e2eignore")
+                      continue
+                  examples.append({"example": example})
+              if not examples:
+                  print("ERROR: no runnable examples found after applying .e2eignore filters", file=sys.stderr)
+                  sys.exit(1)
 
           result = json.dumps(examples)
           with open(os.environ["GITHUB_OUTPUT"], "a") as fout:

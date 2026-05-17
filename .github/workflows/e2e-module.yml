@@ -1,0 +1,399 @@
+---
+name: E2E module runner
+
+on:
+  workflow_call:
+    inputs:
+      source:
+        required: true
+        type: string
+      branch:
+        required: false
+        type: string
+        default: ""
+      name:
+        required: false
+        type: string
+        default: ""
+      callback_repo:
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  getexamples:
+    name: Discover examples
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      examples: ${{ steps.getexamples.outputs.examples }}
+    steps:
+      - name: Checkout ${{ inputs.source }} (${{ inputs.branch || 'default branch' }})
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ inputs.source }}
+          ref: ${{ inputs.branch }}
+
+      - name: Get examples
+        id: getexamples
+        shell: bash
+        run: |
+          python3 - << 'PYEOF'
+          import json
+          import os
+          import pathlib
+
+          examples_dir = pathlib.Path("examples")
+          eligible_examples = []
+          discovered_examples = []
+
+          if examples_dir.is_dir():
+              for folder in sorted(path for path in examples_dir.iterdir() if path.is_dir()):
+                  if any(folder.glob("*.tf")):
+                      discovered_examples.append(folder.name)
+                      if not (folder / ".e2eignore").exists():
+                          eligible_examples.append(folder.name)
+
+          if not discovered_examples:
+              print("No example directories with Terraform files found under examples/ — nothing to test.")
+          elif not eligible_examples:
+              print("All discovered examples are marked with .e2eignore — nothing to test.")
+          else:
+              print(f"Eligible examples: {eligible_examples}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"examples={json.dumps(eligible_examples)}\n")
+          PYEOF
+
+  checksetup:
+    name: Check global setup
+    runs-on: ubuntu-latest
+    needs: getexamples
+    permissions:
+      contents: read
+    outputs:
+      setup_mode: ${{ steps.check.outputs.setup_mode }}
+    steps:
+      - name: Checkout ${{ inputs.source }} (${{ inputs.branch || 'default branch' }})
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ inputs.source }}
+          ref: ${{ inputs.branch }}
+
+      - name: Check global setup mode
+        id: check
+        shell: bash
+        run: |
+          if make -qp 2>/dev/null | grep -Fxq "globalsetup:"; then
+            echo "setup_mode=make" >> "$GITHUB_OUTPUT"
+          elif [ -f examples/setup.sh ]; then
+            echo "setup_mode=script" >> "$GITHUB_OUTPUT"
+          else
+            echo "setup_mode=none" >> "$GITHUB_OUTPUT"
+            echo "No globalsetup target or examples/setup.sh found — skipping global setup."
+          fi
+
+  globalsetup:
+    name: Global setup
+    if: needs.checksetup.outputs.setup_mode != 'none'
+    runs-on: ubuntu-latest
+    environment: test
+    needs: checksetup
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      TF_IN_AUTOMATION: "1"
+      TF_VAR_enable_telemetry: "false"
+    steps:
+      - name: Checkout ${{ inputs.source }} (${{ inputs.branch || 'default branch' }})
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ inputs.source }}
+          ref: ${{ inputs.branch }}
+
+      - name: Obtain OIDC credential helper
+        run: |
+          export REMOTE_SCRIPT="https://raw.githubusercontent.com/Azure/tfmod-scaffold/main/avm_scripts"
+          curl -H 'Cache-Control: no-cache, no-store' -sSL \
+            "$REMOTE_SCRIPT/prepare-credential.sh" -o "$RUNNER_TEMP/prepare-credential.sh"
+          source "$RUNNER_TEMP/prepare-credential.sh"
+          echo "ARM_OIDC_REQUEST_TOKEN=$ARM_OIDC_REQUEST_TOKEN" >> "$GITHUB_ENV"
+          echo "ARM_OIDC_REQUEST_URL=$ARM_OIDC_REQUEST_URL" >> "$GITHUB_ENV"
+        env:
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_USE_OIDC: "true"
+
+      - name: Run global setup
+        shell: bash
+        env:
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+          ARM_TENANT_ID_OVERRIDE: ${{ secrets.ARM_TENANT_ID_OVERRIDE }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          ARM_SUBSCRIPTION_ID_OVERRIDE: ${{ secrets.ARM_SUBSCRIPTION_ID_OVERRIDE }}
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_CLIENT_ID_OVERRIDE: ${{ secrets.ARM_CLIENT_ID_OVERRIDE }}
+          ARM_USE_OIDC: "true"
+          SETUP_MODE: ${{ needs.checksetup.outputs.setup_mode }}
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$(pwd):/src" -w /src/examples \
+            --network=host \
+            -e TF_IN_AUTOMATION \
+            -e TF_VAR_enable_telemetry \
+            -e AVM_MOD_PATH=/src \
+            -e ARM_SUBSCRIPTION_ID \
+            -e ARM_TENANT_ID \
+            -e ARM_CLIENT_ID \
+            -e ARM_OIDC_REQUEST_TOKEN \
+            -e ARM_OIDC_REQUEST_URL \
+            -e ARM_USE_OIDC \
+            -e SETUP_MODE \
+            --env-file <(env | grep '^TF_VAR_' | grep -v ' "TF_VAR_') \
+            mcr.microsoft.com/azterraform:avm-latest \
+            bash -lc '
+              cd /src
+              if [ "$SETUP_MODE" = "make" ]; then
+                make globalsetup
+              else
+                chmod +x examples/setup.sh
+                cd examples
+                ./setup.sh
+              fi
+            '
+
+  testexamples:
+    if: >
+      always() &&
+      needs.getexamples.outputs.examples != '[]' &&
+      needs.getexamples.result == 'success' &&
+      needs.checksetup.result == 'success' &&
+      (needs.globalsetup.result == 'success' || needs.globalsetup.result == 'skipped')
+    name: Test Example - ${{ matrix.example }}
+    runs-on: ubuntu-latest
+    needs: [getexamples, checksetup, globalsetup]
+    environment: test
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      matrix:
+        example: ${{ fromJson(needs.getexamples.outputs.examples) }}
+      fail-fast: false
+    env:
+      TF_IN_AUTOMATION: "1"
+      TF_VAR_enable_telemetry: "false"
+    steps:
+      - name: Checkout ${{ inputs.source }} (${{ inputs.branch || 'default branch' }})
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ inputs.source }}
+          ref: ${{ inputs.branch }}
+
+      - name: Obtain OIDC credential helper
+        run: |
+          export REMOTE_SCRIPT="https://raw.githubusercontent.com/Azure/tfmod-scaffold/main/avm_scripts"
+          curl -H 'Cache-Control: no-cache, no-store' -sSL \
+            "$REMOTE_SCRIPT/prepare-credential.sh" -o "$RUNNER_TEMP/prepare-credential.sh"
+          source "$RUNNER_TEMP/prepare-credential.sh"
+          echo "ARM_OIDC_REQUEST_TOKEN=$ARM_OIDC_REQUEST_TOKEN" >> "$GITHUB_ENV"
+          echo "ARM_OIDC_REQUEST_URL=$ARM_OIDC_REQUEST_URL" >> "$GITHUB_ENV"
+        env:
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_USE_OIDC: "true"
+
+      - name: Test example
+        shell: bash
+        env:
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+          ARM_TENANT_ID_OVERRIDE: ${{ secrets.ARM_TENANT_ID_OVERRIDE }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          ARM_SUBSCRIPTION_ID_OVERRIDE: ${{ secrets.ARM_SUBSCRIPTION_ID_OVERRIDE }}
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_CLIENT_ID_OVERRIDE: ${{ secrets.ARM_CLIENT_ID_OVERRIDE }}
+          ARM_USE_OIDC: "true"
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$(pwd):/src" -w /src \
+            --network=host \
+            -e TF_IN_AUTOMATION \
+            -e TF_VAR_enable_telemetry \
+            -e AVM_MOD_PATH=/src \
+            -e AVM_EXAMPLE=${{ matrix.example }} \
+            -e ARM_SUBSCRIPTION_ID \
+            -e ARM_TENANT_ID \
+            -e ARM_CLIENT_ID \
+            -e ARM_OIDC_REQUEST_TOKEN \
+            -e ARM_OIDC_REQUEST_URL \
+            -e ARM_USE_OIDC \
+            --env-file <(env | grep '^TF_VAR_' | grep -v ' "TF_VAR_') \
+            mcr.microsoft.com/azterraform:avm-latest \
+            bash -lc '
+              if make -qp 2>/dev/null | grep -Fxq "test-example:"; then
+                make test-example
+              elif make -qp 2>/dev/null | grep -Fxq "test-examples:"; then
+                make test-examples
+              else
+                echo "No test-example or test-examples target found."
+                exit 1
+              fi
+            '
+
+  checkteardown:
+    name: Check global teardown
+    if: always()
+    runs-on: ubuntu-latest
+    needs: testexamples
+    permissions:
+      contents: read
+    outputs:
+      teardown_mode: ${{ steps.check.outputs.teardown_mode }}
+    steps:
+      - name: Checkout ${{ inputs.source }} (${{ inputs.branch || 'default branch' }})
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ inputs.source }}
+          ref: ${{ inputs.branch }}
+
+      - name: Check global teardown mode
+        id: check
+        shell: bash
+        run: |
+          if make -qp 2>/dev/null | grep -Fxq "globalteardown:"; then
+            echo "teardown_mode=make" >> "$GITHUB_OUTPUT"
+          elif [ -f examples/teardown.sh ]; then
+            echo "teardown_mode=script" >> "$GITHUB_OUTPUT"
+          else
+            echo "teardown_mode=none" >> "$GITHUB_OUTPUT"
+            echo "No globalteardown target or examples/teardown.sh found — skipping global teardown."
+          fi
+
+  globalteardown:
+    name: Global teardown
+    if: always() && needs.checkteardown.outputs.teardown_mode != 'none'
+    runs-on: ubuntu-latest
+    environment: test
+    needs: checkteardown
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      TF_IN_AUTOMATION: "1"
+      TF_VAR_enable_telemetry: "false"
+    steps:
+      - name: Checkout ${{ inputs.source }} (${{ inputs.branch || 'default branch' }})
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ inputs.source }}
+          ref: ${{ inputs.branch }}
+
+      - name: Obtain OIDC credential helper
+        run: |
+          export REMOTE_SCRIPT="https://raw.githubusercontent.com/Azure/tfmod-scaffold/main/avm_scripts"
+          curl -H 'Cache-Control: no-cache, no-store' -sSL \
+            "$REMOTE_SCRIPT/prepare-credential.sh" -o "$RUNNER_TEMP/prepare-credential.sh"
+          source "$RUNNER_TEMP/prepare-credential.sh"
+          echo "ARM_OIDC_REQUEST_TOKEN=$ARM_OIDC_REQUEST_TOKEN" >> "$GITHUB_ENV"
+          echo "ARM_OIDC_REQUEST_URL=$ARM_OIDC_REQUEST_URL" >> "$GITHUB_ENV"
+        env:
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_USE_OIDC: "true"
+
+      - name: Run global teardown
+        shell: bash
+        env:
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+          ARM_TENANT_ID_OVERRIDE: ${{ secrets.ARM_TENANT_ID_OVERRIDE }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          ARM_SUBSCRIPTION_ID_OVERRIDE: ${{ secrets.ARM_SUBSCRIPTION_ID_OVERRIDE }}
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_CLIENT_ID_OVERRIDE: ${{ secrets.ARM_CLIENT_ID_OVERRIDE }}
+          ARM_USE_OIDC: "true"
+          TEARDOWN_MODE: ${{ needs.checkteardown.outputs.teardown_mode }}
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$(pwd):/src" -w /src/examples \
+            --network=host \
+            -e TF_IN_AUTOMATION \
+            -e TF_VAR_enable_telemetry \
+            -e AVM_MOD_PATH=/src \
+            -e ARM_SUBSCRIPTION_ID \
+            -e ARM_TENANT_ID \
+            -e ARM_CLIENT_ID \
+            -e ARM_OIDC_REQUEST_TOKEN \
+            -e ARM_OIDC_REQUEST_URL \
+            -e ARM_USE_OIDC \
+            -e TEARDOWN_MODE \
+            --env-file <(env | grep '^TF_VAR_' | grep -v ' "TF_VAR_') \
+            mcr.microsoft.com/azterraform:avm-latest \
+            bash -lc '
+              cd /src
+              if [ "$TEARDOWN_MODE" = "make" ]; then
+                make globalteardown
+              else
+                chmod +x examples/teardown.sh
+                cd examples
+                ./teardown.sh
+              fi
+            '
+
+  notify-agent:
+    name: Notify agent
+    if: always() && inputs.callback_repo != ''
+    runs-on: ubuntu-latest
+    needs: [getexamples, checksetup, globalsetup, testexamples, checkteardown, globalteardown]
+    steps:
+      - name: Send callback
+        env:
+          CALLBACK_REPO: ${{ inputs.callback_repo }}
+          AGENT_DISPATCH_TOKEN: ${{ secrets.AGENT_DISPATCH_TOKEN }}
+          MODULE: ${{ inputs.source }}
+          BRANCH: ${{ inputs.branch }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          NEEDS_CONTEXT: ${{ toJson(needs) }}
+        shell: bash
+        run: |
+          if [ -z "${AGENT_DISPATCH_TOKEN}" ]; then
+            echo "AGENT_DISPATCH_TOKEN secret not set — skipping callback"
+            exit 0
+          fi
+
+          status=$(python3 - << 'PYEOF'
+          import json
+          import os
+
+          needs = json.loads(os.environ["NEEDS_CONTEXT"])
+          results = [job["result"] for job in needs.values()]
+
+          if any(result == "failure" for result in results):
+              print("failure")
+          elif any(result == "cancelled" for result in results):
+              print("cancelled")
+          else:
+              print("success")
+          PYEOF
+          )
+
+          payload=$(jq -n \
+            --arg status "$status" \
+            --arg module "$MODULE" \
+            --arg branch "$BRANCH" \
+            --arg workflow "e2e" \
+            --arg run_url "$RUN_URL" \
+            '{event_type: "ci-result", client_payload: {status: $status, module: $module, branch: $branch, workflow: $workflow, run_url: $run_url}}')
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $AGENT_DISPATCH_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/$CALLBACK_REPO/dispatches" \
+            -d "$payload"
+          echo "Notified $CALLBACK_REPO: $status"

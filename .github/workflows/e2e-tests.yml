@@ -1,8 +1,9 @@
 ---
 name: E2E tests
 
-# This workflow deploys real Azure resources.
-# Credentials are gated behind the "test" environment (requires manual approval).
+# This workflow fans out at the module level only.
+# Each module entry calls a reusable workflow that discovers examples and
+# fans them out one job per example inside the checked-out module repository.
 #
 # Trigger sources
 # ──────────────
@@ -15,8 +16,8 @@ name: E2E tests
 #     "branch":  "feature/my-fix"                               // optional
 #   }
 #
-# Only repository_dispatch events whose source org is in ALLOWED_ORGS are accepted.
-# The "test" environment gate on the e2e job provides a second layer of protection.
+# Only repository_dispatch events whose source org is in ALLOWED_ORGS are accepted
+# before any external repository is checked out.
 on:
   workflow_dispatch:
     inputs:
@@ -89,211 +90,22 @@ jobs:
           print(f"Modules to process: {result}")
           PYEOF
 
-  # ── 2. Run e2e tests for each module ──────────────────────────────────────
-  #
-  # For each module this job:
-  #   a) runs the current AVM global setup flow when available
-  #   b) runs the current AVM example test flow when available
-  #   c) falls back to legacy example targets/scripts for older modules
-  #   d) runs the current AVM global teardown flow when available
-  #
+  # ── 2. Hand each module to the reusable per-module E2E workflow ───────────
   e2e:
     name: ${{ matrix.module.name }}
     needs: setup
     if: needs.setup.outputs.modules != '[]'
-    runs-on: ubuntu-latest
-    environment: test
-    permissions:
-      id-token: write
-      contents: read
     strategy:
       matrix:
         module: ${{ fromJson(needs.setup.outputs.modules) }}
       fail-fast: false
-    env:
-      TF_IN_AUTOMATION: "1"
-      TF_VAR_enable_telemetry: "false"
-    steps:
-      - name: Checkout ${{ matrix.module.source }} (${{ matrix.module.branch || 'default branch' }})
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: ${{ matrix.module.source }}
-          ref: ${{ matrix.module.branch }}
-
-      # Fetches an OIDC request token that the AVM Docker container uses to
-      # exchange for an Azure access token at runtime.
-      - name: Obtain OIDC credential helper
-        run: |
-          export REMOTE_SCRIPT="https://raw.githubusercontent.com/Azure/tfmod-scaffold/main/avm_scripts"
-          curl -H 'Cache-Control: no-cache, no-store' -sSL \
-            "$REMOTE_SCRIPT/prepare-credential.sh" -o "$RUNNER_TEMP/prepare-credential.sh"
-          source "$RUNNER_TEMP/prepare-credential.sh"
-          echo "ARM_OIDC_REQUEST_TOKEN=$ARM_OIDC_REQUEST_TOKEN" >> "$GITHUB_ENV"
-          echo "ARM_OIDC_REQUEST_URL=$ARM_OIDC_REQUEST_URL"   >> "$GITHUB_ENV"
-        env:
-          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
-          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
-          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
-          ARM_USE_OIDC: "true"
-
-      # ── global setup (if examples/setup.sh exists) ──────────────────────────
-      - name: Run global setup
-        shell: bash
-        env:
-          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
-          ARM_TENANT_ID_OVERRIDE: ${{ secrets.ARM_TENANT_ID_OVERRIDE }}
-          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
-          ARM_SUBSCRIPTION_ID_OVERRIDE: ${{ secrets.ARM_SUBSCRIPTION_ID_OVERRIDE }}
-          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
-          ARM_CLIENT_ID_OVERRIDE: ${{ secrets.ARM_CLIENT_ID_OVERRIDE }}
-          ARM_USE_OIDC: "true"
-        run: |
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$(pwd):/src" -w /src/examples \
-            --network=host \
-            -e TF_IN_AUTOMATION \
-            -e TF_VAR_enable_telemetry \
-            -e AVM_MOD_PATH=/src \
-            -e ARM_SUBSCRIPTION_ID \
-            -e ARM_TENANT_ID \
-            -e ARM_CLIENT_ID \
-            -e ARM_OIDC_REQUEST_TOKEN \
-            -e ARM_OIDC_REQUEST_URL \
-            -e ARM_USE_OIDC \
-            --env-file <(env | grep '^TF_VAR_' | grep -v ' "TF_VAR_') \
-            mcr.microsoft.com/azterraform:avm-latest \
-            bash -lc '
-              cd /src
-              if make -qp 2>/dev/null | grep -Fxq "globalsetup:"; then
-                make globalsetup
-              elif [ -f examples/setup.sh ]; then
-                chmod +x examples/setup.sh
-                cd examples
-                ./setup.sh
-              else
-                echo "No globalsetup target or examples/setup.sh found — skipping global setup."
-              fi
-            '
-
-      # ── test each example ───────────────────────────────────────────────────
-      - name: Test examples
-        shell: bash
-        env:
-          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
-          ARM_TENANT_ID_OVERRIDE: ${{ secrets.ARM_TENANT_ID_OVERRIDE }}
-          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
-          ARM_SUBSCRIPTION_ID_OVERRIDE: ${{ secrets.ARM_SUBSCRIPTION_ID_OVERRIDE }}
-          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
-          ARM_CLIENT_ID_OVERRIDE: ${{ secrets.ARM_CLIENT_ID_OVERRIDE }}
-          ARM_USE_OIDC: "true"
-        run: |
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$(pwd):/src" -w /src \
-            --network=host \
-            -e TF_IN_AUTOMATION \
-            -e TF_VAR_enable_telemetry \
-            -e AVM_MOD_PATH=/src \
-            -e AVM_RUNNING_IN_GITHUB_ACTIONS=true \
-            -e ARM_SUBSCRIPTION_ID \
-            -e ARM_TENANT_ID \
-            -e ARM_CLIENT_ID \
-            -e ARM_OIDC_REQUEST_TOKEN \
-            -e ARM_OIDC_REQUEST_URL \
-            -e ARM_USE_OIDC \
-            --env-file <(env | grep '^TF_VAR_' | grep -v ' "TF_VAR_') \
-            mcr.microsoft.com/azterraform:avm-latest \
-            bash -lc '
-              if make -qp 2>/dev/null | grep -Fxq "test-examples:"; then
-                make test-examples
-                exit 0
-              fi
-
-              mapfile -t EXAMPLES < <(find examples -maxdepth 1 -mindepth 1 -type d ! -name "_*" | sort)
-              if [ ${#EXAMPLES[@]} -eq 0 ]; then
-                echo "No example directories found under examples/ — nothing to test."
-                exit 0
-              fi
-
-              echo "Falling back to legacy make test-example flow for ${#EXAMPLES[@]} example(s): ${EXAMPLES[*]}"
-              for EXAMPLE_DIR in "${EXAMPLES[@]}"; do
-                EXAMPLE_NAME=$(basename "$EXAMPLE_DIR")
-                echo "::group::Testing example: $EXAMPLE_NAME"
-                AVM_EXAMPLE="$EXAMPLE_NAME" make test-example
-                echo "::endgroup::"
-              done
-            '
-
-      # ── global teardown (if examples/teardown.sh exists) ───────────────────
-      - name: Run global teardown
-        if: always()
-        shell: bash
-        env:
-          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
-          ARM_TENANT_ID_OVERRIDE: ${{ secrets.ARM_TENANT_ID_OVERRIDE }}
-          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
-          ARM_SUBSCRIPTION_ID_OVERRIDE: ${{ secrets.ARM_SUBSCRIPTION_ID_OVERRIDE }}
-          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
-          ARM_CLIENT_ID_OVERRIDE: ${{ secrets.ARM_CLIENT_ID_OVERRIDE }}
-          ARM_USE_OIDC: "true"
-        run: |
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$(pwd):/src" -w /src/examples \
-            --network=host \
-            -e TF_IN_AUTOMATION \
-            -e TF_VAR_enable_telemetry \
-            -e AVM_MOD_PATH=/src \
-            -e ARM_SUBSCRIPTION_ID \
-            -e ARM_TENANT_ID \
-            -e ARM_CLIENT_ID \
-            -e ARM_OIDC_REQUEST_TOKEN \
-            -e ARM_OIDC_REQUEST_URL \
-            -e ARM_USE_OIDC \
-            --env-file <(env | grep '^TF_VAR_' | grep -v ' "TF_VAR_') \
-            mcr.microsoft.com/azterraform:avm-latest \
-            bash -lc '
-              cd /src
-              if make -qp 2>/dev/null | grep -Fxq "globalteardown:"; then
-                make globalteardown
-              elif [ -f examples/teardown.sh ]; then
-                chmod +x examples/teardown.sh
-                cd examples
-                ./teardown.sh
-              else
-                echo "No globalteardown target or examples/teardown.sh found — skipping global teardown."
-              fi
-            '
-
-      - name: Notify agent on completion
-        if: always() && github.event_name == 'repository_dispatch'
-        env:
-          CALLBACK_REPO: ${{ github.event.client_payload.callback_repo }}
-          AGENT_DISPATCH_TOKEN: ${{ secrets.AGENT_DISPATCH_TOKEN }}
-          JOB_STATUS: ${{ job.status }}
-          MODULE: ${{ matrix.module.source }}
-          BRANCH: ${{ matrix.module.branch }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          if [ -z "${CALLBACK_REPO}" ]; then
-            echo "No callback_repo in payload — skipping callback"
-            exit 0
-          fi
-          if [ -z "${AGENT_DISPATCH_TOKEN}" ]; then
-            echo "AGENT_DISPATCH_TOKEN secret not set — skipping callback"
-            exit 0
-          fi
-          payload=$(jq -n \
-            --arg status  "$JOB_STATUS" \
-            --arg module  "$MODULE" \
-            --arg branch  "$BRANCH" \
-            --arg workflow "e2e" \
-            --arg run_url "$RUN_URL" \
-            '{event_type: "ci-result", client_payload: {status: $status, module: $module, branch: $branch, workflow: $workflow, run_url: $run_url}}')
-          curl -fsS -X POST \
-            -H "Authorization: Bearer $AGENT_DISPATCH_TOKEN" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/$CALLBACK_REPO/dispatches" \
-            -d "$payload"
-          echo "Notified $CALLBACK_REPO: $JOB_STATUS"
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/e2e-module.yml
+    with:
+      source: ${{ matrix.module.source }}
+      branch: ${{ matrix.module.branch }}
+      name: ${{ matrix.module.name }}
+      callback_repo: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.callback_repo || '' }}
+    secrets: inherit

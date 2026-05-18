@@ -17,14 +17,15 @@ trigger these workflows directly via `repository_dispatch` — no manual YAML ed
 ## How it works
 
 1. `modules.yaml` lists every module (and branch) you are working on.
-2. Four reusable workflows read that registry and fan out one job per module.
-3. Alternatively, any workflow can be triggered via `repository_dispatch` from an agent —
+2. The top-level workflows read that registry and fan out one job per module.
+3. The E2E workflow then hands each module to a reusable workflow that fans out one job per example.
+4. Alternatively, any workflow can be triggered via `repository_dispatch` from an agent —
    bypassing `modules.yaml` entirely.
 
 | Workflow | Trigger | Azure credentials? | What it runs |
 |---|---|---|---|
 | **Checks** | push · dispatch | ✓ | `make pre-commit` → `make pr-check` (recent AVM modules also run Well-Architected/conftest checks here) |
-| **E2E tests** | workflow_dispatch · repository_dispatch | ✓ | `make test-examples` on recent AVM modules; legacy `make test-example` fallback |
+| **E2E tests** | workflow_dispatch · repository_dispatch | ✓ | module-level fan-out in this repo, then one example job per discovered example |
 | **Terraform tests** | dispatch · push | unit: ✗ / integration: ✓ | `make tf-test-unit` / `make tf-test-integration` |
 
 All workflows accept an optional **`module_filter`**
@@ -263,7 +264,8 @@ avm-contributions/
 └── .github/
     └── workflows/
         ├── checks.yml               # pre-commit + pr-check (replaces pre-commit.yml + pr-check.yml)
-        ├── e2e-tests.yml            # runs e2e tests (needs Azure credentials)
+        ├── e2e-tests.yml            # entrypoint: builds the module matrix and calls the reusable E2E workflow
+        ├── e2e-module.yml           # reusable workflow: discovers examples and fans out one job per example
         ├── terraform-tests.yml     # runs unit + integration terraform tests
         └── upgrade-tests.yml       # tests module upgrades (apply base → upgrade → verify)
 ```

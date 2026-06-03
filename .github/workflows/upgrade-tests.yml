@@ -67,7 +67,7 @@ jobs:
           PYEOF
 
       - name: Checkout ${{ github.event.client_payload.fork_repo }} at ${{ github.event.client_payload.head_ref }}
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: ${{ github.event.client_payload.fork_repo }}
           ref: ${{ github.event.client_payload.head_ref }}
@@ -129,14 +129,14 @@ jobs:
       APPLY_HEAD: ${{ github.event.client_payload.apply_head }}
     steps:
       - name: Checkout base (${{ github.event.client_payload.base_ref }})
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: ${{ env.FORK_REPO }}
           ref: ${{ env.BASE_REF }}
           path: module-base
 
       - name: Checkout head (${{ github.event.client_payload.head_ref }})
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: ${{ env.FORK_REPO }}
           ref: ${{ env.HEAD_REF }}
